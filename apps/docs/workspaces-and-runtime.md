@@ -212,6 +212,12 @@ only when you intentionally want eligible debug records deleted. Semantic
 summaries, audits, semantic memory, NATS retention, and Hatchet history are not
 part of this maintenance subsystem.
 
+## Operator turn counts
+
+Operator Fleet **Turns** means durable logical segments. Worker or lease recovery does
+not increase it: replacement attempts and their fence transition are nested beneath the
+same turn in runtime details.
+
 ## Back Compatibility
 
 If `.callagent/workspaces.json` is missing and `CALLAGENT_AGENT_INDEX` is set,

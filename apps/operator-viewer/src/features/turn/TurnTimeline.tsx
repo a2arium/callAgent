@@ -199,6 +199,7 @@ export function TurnDetail(props: {
         <details className="rounded-lg border border-border bg-background/50 p-3">
           <summary className="cursor-pointer text-sm font-medium">Runtime segment details</summary>
           <div className="mt-3 grid gap-3 border-t border-border pt-3">
+            {(turn.recoveries?.length ?? 0) > 0 ? <RecoveryHistory recoveries={turn.recoveries!} /> : null}
             <ExecutionAttempts attempts={turn.attempts} tenantId={props.tenantId} config={props.config ?? {}} />
 
         <section className="grid gap-2">
@@ -255,6 +256,30 @@ export function TurnDetail(props: {
           </div>
         </details>
       </div>
+    </section>
+  );
+}
+
+function RecoveryHistory(props: { recoveries: NonNullable<TurnRun['recoveries']> }): React.ReactElement {
+  return (
+    <section className="grid gap-2 rounded-lg border border-border bg-background/50 p-3">
+      <div>
+        <h4 className="text-sm font-semibold">Recovery history</h4>
+        <p className="text-xs text-muted-foreground">Infrastructure recovery does not create another logical turn.</p>
+      </div>
+      {props.recoveries.map((recovery) => (
+        <div key={`${recovery.id}:${recovery.sourceFence}`} className="rounded-md border border-border bg-card px-3 py-2 text-xs">
+          <p className="font-medium">
+            {recovery.reason === 'worker_lifetime_lost' ? 'Worker replacement' : 'Expired lease'} · {recovery.state}
+          </p>
+          <p className="mt-1 text-muted-foreground">
+            Fence {recovery.sourceFence}{recovery.replacementFence ? ` → ${recovery.replacementFence}` : ''}
+            {recovery.sourceWorkerName || recovery.replacementWorkerName
+              ? ` · ${recovery.sourceWorkerName ?? 'unknown worker'} → ${recovery.replacementWorkerName ?? 'pending worker'}`
+              : ''}
+          </p>
+        </div>
+      ))}
     </section>
   );
 }
@@ -495,6 +520,7 @@ function AttemptRow(props: { attempt: TurnAttemptRun; tenantId?: string; config:
     claimId: attempt.claimId,
     turnFence: attempt.turnFence,
     claimedGeneration: attempt.claimedGeneration,
+    supersededReason: attempt.supersededReason,
     idempotencyKey: attempt.idempotencyKey,
     error: attempt.error,
   };
@@ -578,6 +604,8 @@ function dispositionLabel(disposition: TurnAttemptRun['disposition']): string {
     case 'matching_replay': return 'Replay';
     case 'superseded': return 'Replaced';
     case 'terminal_replay': return 'Terminal replay';
+    case 'lease_expired_recovery_staged': return 'Lease recovery';
+    case 'worker_lifetime_lost_recovery_staged': return 'Worker recovery';
     default: return 'Not captured';
   }
 }

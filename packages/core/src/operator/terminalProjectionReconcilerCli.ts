@@ -18,6 +18,12 @@ async function main(): Promise<void> {
             },
         });
         console.info('[TerminalProjectionReconciler] complete', summary);
+        const logicalTurns = await projection.reconcileLogicalTurnCounts({
+            batchSize,
+            tenantId: process.env.CALLAGENT_PROJECTION_RECONCILE_TENANT_ID,
+            taskId: process.env.CALLAGENT_PROJECTION_RECONCILE_TASK_ID,
+        });
+        console.info('[LogicalTurnCountReconciler] complete', logicalTurns);
         const cognition = await projection.reconcileCognitiveTurns({
             batchSize,
             tenantId: process.env.CALLAGENT_PROJECTION_RECONCILE_TENANT_ID,

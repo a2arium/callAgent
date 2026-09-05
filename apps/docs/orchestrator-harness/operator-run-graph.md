@@ -118,6 +118,16 @@ Important fields:
 `AgentRun.turnCount` counts committed cognitive turns only. A provisional
 `turn.observed` may be shown for live diagnosis, but it does not advance the aggregate.
 
+Fleet's **Turns** column uses `logicalTurnCount`: distinct durable segments identified
+by `(taskId, turnSeq)`. Recovery deliveries, ownership probes, and replacement attempts
+remain nested diagnostics and never increment it. Operator API records expose
+`logicalTurns` and `cognitiveTurns`; legacy `turns` remains the cognitive count for
+compatibility.
+
+Logical-turn state is arbitrated from the coordinator snapshot. The live claim with the
+highest valid fence overrides stale paused or superseded evidence. An expired claim or
+staged recovery is `recovering`; an authoritative terminal result always wins.
+
 ### `MemoryOperationRun`
 
 One compact memory operation captured from existing task execution paths.

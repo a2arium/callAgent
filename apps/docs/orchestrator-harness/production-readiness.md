@@ -289,3 +289,6 @@ Production readiness is accepted when:
 - `/ready` reports installation-wide eligible worker instances; each segment is
   owned by one exact instance. A stale provider failure from an instance recorded
   in worker-recovery provenance must be ignored by terminal convergence.
+- After introducing `agent_runs.logical_turn_count`, run
+  `yarn projection:reconcile-terminals`. It backfills missing logical counts in
+  bounded tenant-scoped batches without modifying cognitive `turn_count`.

@@ -5,6 +5,7 @@ import {
     buildAgentRunGraph,
     buildTaskCoordinationView,
     groupTurnAttempts,
+    applyTaskTurnAuthority,
     type AgentRunSourceEvent,
     type DriverRunView,
 } from '../src/operator/runGraph.js';
@@ -1662,6 +1663,64 @@ describe('buildAgentRunGraph', () => {
             }),
             expect.objectContaining({ attemptKey: 'claim:claim-3', status: 'queued' }),
         ]));
+    });
+
+    it('lets the highest-fence active claim own a recovered logical turn', () => {
+        const grouped = groupTurnAttempts([
+            {
+                id: 'old', rootTaskId: 'task-1', taskId: 'task-1', status: 'waiting',
+                operation: 'turn.segment', turnSeq: 2, attemptKey: 'claim:old', claimId: 'old',
+                turnFence: '2', claimedGeneration: '2', disposition: 'executed', boundaryKind: 'paused',
+            },
+            {
+                id: 'new', rootTaskId: 'task-1', taskId: 'task-1', status: 'running',
+                operation: 'turn.segment', turnSeq: 2, attemptKey: 'claim:new', claimId: 'new',
+                turnFence: '3', claimedGeneration: '2', disposition: 'executed',
+            },
+        ]).turns;
+        const projected = applyTaskTurnAuthority(grouped, {
+            taskId: 'task-1', state: 'owned', health: 'healthy', observedAt: '2026-09-05T12:00:00.000Z',
+            requestedGeneration: '2', completedGeneration: '1', issues: [],
+            active: {
+                claimId: 'new', fence: '3', ownerId: 'worker-new', turnSeq: 2, claimedGeneration: '2',
+                phase: 'executing', acquiredAt: '2026-09-05T11:59:00.000Z', heartbeatAt: '2026-09-05T12:00:00.000Z',
+                expiresAt: '2026-09-05T12:02:00.000Z', leaseState: 'live',
+            },
+        });
+
+        expect(projected).toHaveLength(1);
+        expect(projected[0]).toMatchObject({ status: 'running', claimId: 'new', turnFence: '3' });
+        expect(projected[0]?.attempts).toEqual(expect.arrayContaining([
+            expect.objectContaining({ claimId: 'old', disposition: 'superseded' }),
+            expect.objectContaining({ claimId: 'new', status: 'running' }),
+        ]));
+    });
+
+    it('projects a staged recovery separately from attempts', () => {
+        const turn = groupTurnAttempts([{
+            id: 'old', rootTaskId: 'task-1', taskId: 'task-1', status: 'completed',
+            operation: 'turn.segment', turnSeq: 2, attemptKey: 'claim:old', claimId: 'old',
+            turnFence: '2', claimedGeneration: '2', disposition: 'superseded',
+        }]).turns;
+        const sourceClaim = {
+            claimId: 'old', fence: '2', ownerId: 'worker-old', requestKey: 'task-1:turn-request:2',
+            claimedGeneration: '2', turnSeq: 2, phase: 'executing' as const, runtimeSurface: 'hatchet' as const,
+            acquiredAt: '2026-09-05T11:00:00.000Z', heartbeatAt: '2026-09-05T11:01:00.000Z', expiresAt: '2026-09-05T11:02:00.000Z',
+        };
+        const projected = applyTaskTurnAuthority(turn, {
+            taskId: 'task-1', state: 'recovering', health: 'attention', observedAt: '2026-09-05T12:00:00.000Z',
+            requestedGeneration: '2', completedGeneration: '1', issues: ['runnable_without_owner'],
+            dispatchIntent: { generation: '2', state: 'pending', recoveryReason: 'lease_expired', createdAt: '2026-09-05T11:02:00.000Z' },
+        }, [{
+            reason: 'lease_expired', deliveryKey: 'task-1:turn-request:2', generation: '2', turnSeq: 2,
+            stagedAt: '2026-09-05T11:02:00.000Z', sourceClaim,
+        }]);
+
+        expect(projected[0]).toMatchObject({
+            status: 'recovering',
+            attempts: [{ claimId: 'old' }],
+            recoveries: [{ reason: 'lease_expired', state: 'staged', sourceFence: '2' }],
+        });
     });
 });
 

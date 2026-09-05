@@ -12,6 +12,7 @@ export type RuntimeStatus =
   | 'queued'
   | 'running'
   | 'waiting'
+  | 'recovering'
   | 'stuck'
   | 'completed'
   | 'failed'
@@ -54,6 +55,14 @@ export const statusTokens: Record<RuntimeStatus, StatusToken> = {
     shape: 'dashed',
     className: 'border-warning-border bg-warning-bg text-warning',
     srLabel: 'Waiting run',
+  },
+  recovering: {
+    id: 'recovering',
+    label: 'Recovering',
+    icon: Loader2,
+    shape: 'dashed',
+    className: 'border-warning-border bg-warning-bg text-warning',
+    srLabel: 'Recovering run',
   },
   stuck: {
     id: 'stuck',

@@ -115,6 +115,8 @@ import {
 import {
     buildAgentRunGraph,
     buildTaskCoordinationView,
+    applyTaskTurnAuthority,
+    groupTurnAttempts,
     type AgentRunGraph,
     type AgentRunSourceEvent,
     type DriverRunView,
@@ -172,6 +174,7 @@ import {
     finalizeTaskTurnsForTerminalSnapshot,
     markTaskTurnDispatchEnqueued,
     readTaskTurnCoordinator,
+    readTaskTurnRecoveryProvenance,
 } from './TaskTurnCoordinator.js';
 import {
     buildAdmittedTaskSnapshot,
@@ -1090,6 +1093,8 @@ export type AgentRunListItem = {
     finishedAt?: string;
     durationMs?: number;
     turns: number;
+    logicalTurns: number;
+    cognitiveTurns: number;
     children: number;
     llmCalls: number;
     memoryOps?: number;
@@ -2640,6 +2645,11 @@ export class TaskEngine {
                 return withGraphCaps({
                     ...semanticGraph,
                     coordination,
+                    turns: applyTaskTurnAuthority(
+                        semanticGraph.turns,
+                        coordination,
+                        readTaskTurnRecoveryProvenance((current?.snapshot ?? {}) as Record<string, unknown>),
+                    ),
                 }, 'semantic');
             }
         }
@@ -2872,8 +2882,15 @@ export class TaskEngine {
                     }
                     return sum + (numberFromPayload(usage, 'totalCost') ?? 0);
                 }, 0);
-                const turns = runs.filter((run) => run.operation === 'turn.segment' || run.operation === 'segment').length ||
-                    taskTurnEvents.filter((event) => event.type === 'turn.completed').length;
+                const cognitiveTurns = taskTurnEvents.filter((event) => event.type === 'turn.completed').length;
+                const logicalTurns = new Set([
+                    ...runs.filter((run) => run.operation === 'turn.segment' || run.operation === 'segment')
+                        .map((run) => run.turnSeq).filter((value): value is number => typeof value === 'number'),
+                    ...taskTurnEvents.map((event) => {
+                        const payload = isRecordValue(event.payload) ? event.payload : {};
+                        return typeof payload.turnSeq === 'number' ? payload.turnSeq : undefined;
+                    }).filter((value): value is number => value !== undefined),
+                ]).size;
                 const children = new Set([
                     ...runs
                         .filter((run) => run.parentTaskId !== null && run.parentTaskId !== undefined && run.parentTaskId.length > 0)
@@ -2905,7 +2922,9 @@ export class TaskEngine {
                     ...(isTerminal && Number.isFinite(startedMs) && Number.isFinite(updatedMs)
                         ? { durationMs: Math.max(0, updatedMs - startedMs) }
                         : {}),
-                    turns,
+                    turns: cognitiveTurns,
+                    cognitiveTurns,
+                    logicalTurns,
                     children,
                     llmCalls,
                     costUsd,
@@ -3011,7 +3030,15 @@ export class TaskEngine {
     }): Promise<TurnRun | null> {
         const prisma = this.getSessionStorePrisma();
         const direct = prisma ? await new OperatorProjectionRepository(prisma as never).getTurn(params) : undefined;
-        if (direct !== undefined) return direct;
+        if (direct !== undefined) {
+            if (direct === null) return null;
+            const current = await this.sessionManager?.load(params.tenantId, params.taskId);
+            const coordination = buildTaskCoordinationView(params.taskId, current?.snapshot);
+            return applyTaskTurnAuthority(
+                [direct], coordination,
+                readTaskTurnRecoveryProvenance((current?.snapshot ?? {}) as Record<string, unknown>),
+            )[0] ?? null;
+        }
         // Bridge fallback is deliberately bounded and only reconstructs one turn.
         const events = await this.sessionManager!.listEventsSince({
             tenantId: params.tenantId, sessionId: params.taskId, sinceSeq: -1, limit: 500,
@@ -3027,14 +3054,37 @@ export class TaskEngine {
         const limit = clampOperatorDetailLimit(params.limit);
         const prisma = this.getSessionStorePrisma();
         const page = prisma ? await new OperatorProjectionRepository(prisma as never).listTurns({ ...params, limit }) : undefined;
-        return page ?? emptyOperatorPage(limit);
+        if (!page) return emptyOperatorPage(limit);
+        const current = await this.sessionManager?.load(params.tenantId, params.taskId);
+        const coordination = buildTaskCoordinationView(params.taskId, current?.snapshot);
+        return {
+            ...page,
+            items: applyTaskTurnAuthority(
+                page.items, coordination,
+                readTaskTurnRecoveryProvenance((current?.snapshot ?? {}) as Record<string, unknown>),
+            ),
+        };
     }
 
     async listAgentRunTurnAttempts(params: { tenantId: string; taskId: string; turnSeq: number; cursor?: string; limit?: number }): Promise<OperatorPage<TurnAttemptRun>> {
         const limit = clampOperatorDetailLimit(params.limit);
         const prisma = this.getSessionStorePrisma();
         const page = prisma ? await new OperatorProjectionRepository(prisma as never).listTurnAttempts({ ...params, limit }) : undefined;
-        return page ?? emptyOperatorPage(limit);
+        if (!page) return emptyOperatorPage(limit);
+        const current = await this.sessionManager?.load(params.tenantId, params.taskId);
+        const grouped = groupTurnAttempts(page.items).turns;
+        const authoritative = applyTaskTurnAuthority(
+            grouped,
+            buildTaskCoordinationView(params.taskId, current?.snapshot),
+            readTaskTurnRecoveryProvenance((current?.snapshot ?? {}) as Record<string, unknown>),
+        );
+        const byIdentity = new Map(
+            authoritative.flatMap((turn) => turn.attempts).map((attempt) => [attempt.attemptKey ?? attempt.id, attempt]),
+        );
+        return {
+            ...page,
+            items: page.items.map((attempt) => byIdentity.get(attempt.attemptKey ?? attempt.id) ?? attempt),
+        };
     }
 
     async listAgentRunCognitiveTurns(params: { tenantId: string; taskId: string; turnSeq: number; cursor?: string; limit?: number }): Promise<OperatorPage<CognitiveTurnRun>> {

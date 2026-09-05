@@ -41,6 +41,15 @@ describe('buildTurnStacks', () => {
 
     expect(stacks.map((stack) => [stack.displayFirstSeq, stack.displayLastSeq])).toEqual([[1, 2], [3, 5]]);
   });
+
+  it('uses the authoritative segment state instead of an obsolete paused boundary', () => {
+    const active = { ...baseSegment(), status: 'running' as const, severity: 'info' as const, boundaryKind: 'paused' };
+    active.cognitiveTurns = [{ ...cognitiveTurn(1), disposition: 'committed', cognition: { transition: { kind: 'await_event' } } }];
+    expect(buildTurnStacks([active])[0]?.status).toBe('running');
+
+    const recovering = { ...active, status: 'recovering' as const, severity: 'warning' as const };
+    expect(buildTurnStacks([recovering])[0]?.status).toBe('recovering');
+  });
 });
 
 function baseSegment(): TurnRun {

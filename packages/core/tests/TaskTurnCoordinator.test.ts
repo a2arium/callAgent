@@ -12,6 +12,7 @@ import {
     recoverExpiredTaskTurnClaim,
     recoverWorkerLostTaskTurnClaim,
     readWorkerLifetimeRecoveryProvenance,
+    readTaskTurnRecoveryProvenance,
 } from '../src/orchestration/TaskTurnCoordinator.js';
 import { registerTaskEffect } from '../src/orchestration/TaskEffectRegistration.js';
 import { runWithSegmentIdempotencyKey } from '../src/runtime/segmentProcessedKeys.js';
@@ -90,6 +91,14 @@ describe('TaskTurnCoordinator', () => {
             expect.objectContaining({
                 sourceProviderRunId: 'provider-root-a', replacementProviderRunId: 'provider-root-b',
                 replacementClaimId: replacement.result.claim.claimId, replacementFence: '2',
+            }),
+        ]);
+        expect(readTaskTurnRecoveryProvenance(replacement.snapshot)).toEqual([
+            expect.objectContaining({
+                reason: 'worker_lifetime_lost', deliveryKey: 'task-a:turn-request:1',
+                sourceClaim: expect.objectContaining({ claimId: first.result.claim.claimId, fence: '1' }),
+                replacementClaim: expect.objectContaining({ claimId: replacement.result.claim.claimId, fence: '2' }),
+                consumedAt: expect.any(String),
             }),
         ]);
     });

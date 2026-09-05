@@ -19,7 +19,7 @@ import { CopyableId } from '../../design/components/ui/copyable';
 import { Notice } from '../../design/components/ui/notice';
 import { StatusBadge } from '../../design/components/ui/status-badge';
 import { formatCost, formatNumber, formatRelative } from '../../design/format';
-import { deriveFleetSummary, normalizeRuntimeStatus } from '../../domain/derive';
+import { deriveFleetSummary, fleetLogicalTurnCount, normalizeRuntimeStatus } from '../../domain/derive';
 import type { AgentRunGraph, AgentRunListItem } from '../../types';
 import { parseFleetSearch, type FleetSearch } from '../../app/state';
 import { cn } from '../../lib/utils';
@@ -277,7 +277,11 @@ function FleetTable(props: {
         header: 'Task',
         cell: (info) => <CopyableId value={info.getValue()} label="root task ID" />,
       }),
-      columnHelper.accessor('turns', { header: 'Turns', cell: (info) => formatNumber(info.getValue()) }),
+      columnHelper.accessor(fleetLogicalTurnCount, {
+        id: 'logicalTurns',
+        header: () => <span title="Durable logical turns; retries and recovery deliveries are excluded">Turns</span>,
+        cell: (info) => formatNumber(info.getValue()),
+      }),
       columnHelper.accessor('children', { header: 'Children', cell: (info) => formatNumber(info.getValue()) }),
       columnHelper.accessor('llmCalls', { header: 'LLM', cell: (info) => formatNumber(info.getValue()) }),
       columnHelper.accessor('memoryOps', {

@@ -9,7 +9,7 @@ export type TurnStack = {
   lastSeq: number;
   displayFirstSeq: number;
   displayLastSeq: number;
-  status: 'running' | 'waiting' | 'completed' | 'failed' | 'canceled';
+  status: 'running' | 'waiting' | 'recovering' | 'completed' | 'failed' | 'canceled';
   boundary?: string;
 };
 
@@ -113,17 +113,24 @@ function makeStack(segment: TurnRun, turns: CognitiveTurnRun[], boundary?: strin
     turns,
     firstSeq: turns[0]!.cognitionTurnSeq,
     lastSeq: final.cognitionTurnSeq,
-    status: stackStatus(final, terminal, ownerStatus),
+    status: stackStatus(final, terminal, ownerStatus, segment.status),
     ...(terminal ? { boundary: terminal } : {}),
   };
 }
 
-function stackStatus(turn: CognitiveTurnRun, boundary?: string, ownerStatus?: AgentRunStatus): TurnStack['status'] {
+function stackStatus(
+  turn: CognitiveTurnRun,
+  boundary?: string,
+  ownerStatus?: AgentRunStatus,
+  segmentStatus?: AgentRunStatus,
+): TurnStack['status'] {
   // An unfinished turn cannot outlive its task. This is especially important
   // after cancellation, where no terminal turn event will be emitted.
   if ((turn.disposition === 'running' || turn.disposition === 'observed' || turn.disposition === 'superseded') && (ownerStatus === 'canceled' || ownerStatus === 'cancelled')) return 'canceled';
   if ((turn.disposition === 'running' || turn.disposition === 'observed') && ownerStatus === 'failed') return 'failed';
   if ((turn.disposition === 'running' || turn.disposition === 'observed') && ownerStatus === 'completed') return 'completed';
+  if (segmentStatus === 'recovering') return 'recovering';
+  if (segmentStatus === 'running') return 'running';
   if (turn.disposition === 'running') return 'running';
   if (turn.disposition === 'observed' && boundary === 'continue') return 'running';
   if (boundary?.startsWith('await_')) return 'waiting';

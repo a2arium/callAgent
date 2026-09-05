@@ -45,6 +45,8 @@ export type SemanticAgentRunListItem = {
     finishedAt?: string;
     durationMs?: number;
     turns: number;
+    logicalTurns: number;
+    cognitiveTurns: number;
     children: number;
     llmCalls: number;
     memoryOps?: number;
@@ -86,6 +88,7 @@ type PrismaDelegate = {
     findMany?: (args: Record<string, unknown>) => Promise<unknown[]>;
     count?: (args: Record<string, unknown>) => Promise<number>;
     updateMany?: (args: Record<string, unknown>) => Promise<unknown>;
+    groupBy?: (args: Record<string, unknown>) => Promise<unknown[]>;
 };
 
 type ProjectionPrisma = {
@@ -120,6 +123,8 @@ export type CognitiveProjectionReconciliationSummary = {
     scanned: number;
     projected: number;
 };
+
+export type LogicalTurnCountReconciliationSummary = { scanned: number; reconciled: number };
 
 const operatorProjectionProfileEnabled = () => process.env.CALLAGENT_OPERATOR_PROFILE === '1';
 const operatorProjectionSlowMs = () => {
@@ -195,6 +200,7 @@ type SemanticRunRow = {
     parentTaskId?: string | null;
     childCount: number;
     turnCount: number;
+    logicalTurnCount?: number | null;
     llmCallCount: number;
     memoryOpCount: number;
     knownCostUsd?: unknown;
@@ -397,6 +403,7 @@ export class OperatorProjectionRepository {
                 status,
                 childCount: item.children,
                 turnCount: item.turns,
+                logicalTurnCount: item.logicalTurns,
                 llmCallCount: item.llmCalls,
                 memoryOpCount: item.memoryOps ?? 0,
                 knownCostUsd: item.costUsd,
@@ -421,6 +428,7 @@ export class OperatorProjectionRepository {
                 status: preserveTerminal ? undefined : status,
                 childCount: item.children,
                 turnCount: item.turns,
+                logicalTurnCount: item.logicalTurns,
                 llmCallCount: item.llmCalls,
                 memoryOpCount: item.memoryOps ?? 0,
                 knownCostUsd: item.costUsd,
@@ -862,7 +870,7 @@ export class OperatorProjectionRepository {
                     attemptKey,
                     authoritativeTerminal: false,
                 },
-                data: { status: 'running', completedAt: null },
+                data: { status: 'running', disposition: 'executed', completedAt: null },
             });
             await this.prisma.turnRun.updateMany({
                 where: {
@@ -871,6 +879,25 @@ export class OperatorProjectionRepository {
                     attemptKey: { not: attemptKey },
                     turnSeq: active.turnSeq,
                     claimedGeneration: active.claimedGeneration,
+                    authoritativeTerminal: false,
+                },
+                data: {
+                    status: 'completed',
+                    disposition: 'superseded',
+                    completedAt: reconciledAt,
+                    authoritativeTerminal: false,
+                },
+            });
+            return true;
+        }
+        if (coordinator.dispatchIntent?.recovery !== undefined) {
+            const source = coordinator.dispatchIntent.recovery.sourceClaim;
+            await this.prisma.turnRun.updateMany({
+                where: {
+                    tenantId: params.tenantId,
+                    taskId: params.taskId,
+                    claimId: source.claimId,
+                    turnFence: source.fence,
                     authoritativeTerminal: false,
                 },
                 data: {
@@ -1103,6 +1130,46 @@ export class OperatorProjectionRepository {
         return { scanned, projected };
     }
 
+    async reconcileLogicalTurnCounts(params: {
+        tenantId?: string;
+        taskId?: string;
+        batchSize?: number;
+    } = {}): Promise<LogicalTurnCountReconciliationSummary> {
+        if (typeof this.prisma.agentRun?.findMany !== 'function' ||
+            typeof this.prisma.agentRun.updateMany !== 'function' ||
+            typeof this.prisma.turnRun?.groupBy !== 'function') return { scanned: 0, reconciled: 0 };
+        const limit = Math.max(1, Math.min(1_000, params.batchSize ?? 100));
+        let afterId: string | undefined;
+        let scanned = 0;
+        let reconciled = 0;
+        do {
+            const rows = await this.prisma.agentRun.findMany({
+                where: stripUndefined({
+                    tenantId: params.tenantId,
+                    taskId: params.taskId,
+                    logicalTurnCount: null,
+                    ...(afterId ? { id: { gt: afterId } } : {}),
+                }),
+                orderBy: { id: 'asc' },
+                take: limit,
+            }) as SemanticRunRow[];
+            for (const row of rows) {
+                const groups = await this.prisma.turnRun.groupBy({
+                    by: ['turnSeq'],
+                    where: { tenantId: row.tenantId, taskId: row.taskId, turnSeq: { not: null } },
+                }) as unknown[];
+                await this.prisma.agentRun.updateMany({
+                    where: { tenantId: row.tenantId, taskId: row.taskId, logicalTurnCount: null },
+                    data: { logicalTurnCount: groups.length },
+                });
+                reconciled += 1;
+            }
+            scanned += rows.length;
+            afterId = rows.length === limit ? rows.at(-1)?.id : undefined;
+        } while (afterId);
+        return { scanned, reconciled };
+    }
+
     async listAgentRuns(params: SemanticAgentRunListParams): Promise<SemanticAgentRunListPage | undefined> {
         if (!this.isAvailable()) return undefined;
         return operatorProjectionSingleFlight(
@@ -1152,7 +1219,10 @@ export class OperatorProjectionRepository {
             updatedAt: toIso(overflow.updatedAt) ?? new Date().toISOString(),
             id: overflow.id,
         }) : undefined;
-        const items = pageRows.map((row) => rowToListItem(row));
+        const logicalCounts = await this.logicalTurnCounts(pageRows);
+        const items = pageRows.map((row) => rowToListItem(row, {
+            logicalTurns: row.logicalTurnCount ?? logicalCounts.get(row.taskId) ?? 0,
+        }));
         const summary = await this.summarizeAgentRuns(where);
         const mapMs = projectionNow() - mapStartedAt;
         logProjectionProfile('listAgentRuns', profileStartedAt, {
@@ -1801,6 +1871,33 @@ export class OperatorProjectionRepository {
             ...params,
             attemptKey: canonicalTurnAttemptKey(params.claimId, params.attemptKey),
         });
+        if (params.turnSeq !== undefined && typeof this.prisma.agentRun?.updateMany === 'function' &&
+            typeof this.prisma.turnRun?.groupBy === 'function') {
+            const logicalTurns = await this.prisma.turnRun.groupBy({
+                by: ['turnSeq'],
+                where: { tenantId: params.tenantId, taskId: params.taskId, turnSeq: { not: null } },
+            });
+            await this.prisma.agentRun.updateMany({
+                where: { tenantId: params.tenantId, taskId: params.taskId },
+                data: { logicalTurnCount: logicalTurns.length },
+            });
+        }
+    }
+
+    private async logicalTurnCounts(rows: SemanticRunRow[]): Promise<Map<string, number>> {
+        const missing = rows.filter((row) => row.logicalTurnCount === null || row.logicalTurnCount === undefined);
+        if (missing.length === 0 || typeof this.prisma.turnRun?.groupBy !== 'function') return new Map();
+        const grouped = await this.prisma.turnRun.groupBy({
+            by: ['taskId', 'turnSeq'],
+            where: {
+                tenantId: missing[0]!.tenantId,
+                taskId: { in: [...new Set(missing.map((row) => row.taskId))] },
+                turnSeq: { not: null },
+            },
+        }) as Array<{ taskId: string; turnSeq: number }>;
+        const counts = new Map<string, number>();
+        for (const row of grouped) counts.set(row.taskId, (counts.get(row.taskId) ?? 0) + 1);
+        return counts;
     }
 
     private async upsertCognitiveTurn(
@@ -1956,6 +2053,7 @@ export class OperatorProjectionRepository {
         const authoritativeCognitiveTurns = cognitiveTurns.filter((turn) => turn.disposition === 'committed');
         const aggregateCognitiveTurns = authoritativeCognitiveTurns;
         const aggregateTurnCount = aggregateCognitiveTurns.length;
+        const aggregateLogicalTurnCount = turns.length;
         const childCount = graph.edges.filter((edge) => edge.parentTaskId === node.taskId && edge.childTaskId !== undefined).length;
         const llmCallCount = cognitiveTurns.length > 0
             ? aggregateCognitiveTurns.reduce((count, turn) => count + turn.llmCalls.length, 0)
@@ -1977,6 +2075,7 @@ export class OperatorProjectionRepository {
             parentTaskId: node.parentTaskId,
             childCount,
             turnCount: aggregateTurnCount,
+            logicalTurnCount: aggregateLogicalTurnCount,
             llmCallCount,
             memoryOpCount,
             startedAt,
@@ -2003,6 +2102,7 @@ export class OperatorProjectionRepository {
             parentTaskId: node.parentTaskId,
             childCount,
             turnCount: aggregateTurnCount,
+            logicalTurnCount: aggregateLogicalTurnCount,
             llmCallCount,
             memoryOpCount,
             startedAt,
@@ -2233,7 +2333,7 @@ export class OperatorProjectionRepository {
 
 function rowToListItem(
     row: SemanticRunRow,
-    overrides: { children?: number; turns?: number; llmCalls?: number; memoryOps?: number } = {}
+    overrides: { children?: number; turns?: number; logicalTurns?: number; llmCalls?: number; memoryOps?: number } = {}
 ): SemanticAgentRunListItem {
     const status = semanticRunStatus(row);
     return {
@@ -2245,6 +2345,8 @@ function rowToListItem(
         ...(row.terminalAt ? { finishedAt: toIso(row.terminalAt) } : {}),
         ...(typeof row.durationMs === 'number' ? { durationMs: row.durationMs } : {}),
         turns: overrides.turns ?? row.turnCount,
+        cognitiveTurns: overrides.turns ?? row.turnCount,
+        logicalTurns: overrides.logicalTurns ?? row.logicalTurnCount ?? 0,
         children: overrides.children ?? row.childCount,
         llmCalls: overrides.llmCalls ?? row.llmCallCount,
         memoryOps: overrides.memoryOps ?? row.memoryOpCount,
@@ -2509,7 +2611,8 @@ function rowToTurnAttempt(row: SemanticTurnRow): TurnAttemptRun {
 
 function isDisposition(value: unknown): value is NonNullable<TurnRun['disposition']> {
     return value === 'executed' || value === 'queued' || value === 'matching_replay' ||
-        value === 'superseded' || value === 'terminal_replay';
+        value === 'superseded' || value === 'terminal_replay' ||
+        value === 'lease_expired_recovery_staged' || value === 'worker_lifetime_lost_recovery_staged';
 }
 
 function eventAttemptKey(event: OperatorProjectionEvent, suffix: string): string {
@@ -2639,6 +2742,7 @@ function normalizeStatus(status: string): AgentRunStatus {
         case 'queued':
         case 'running':
         case 'waiting':
+        case 'recovering':
         case 'completed':
         case 'failed':
         case 'canceled':

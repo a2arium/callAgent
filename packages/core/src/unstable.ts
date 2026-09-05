@@ -77,6 +77,7 @@ export {
     recoverWorkerLostTaskTurnClaim,
     recoverWorkerLostTaskTurnClaimInSnapshot,
     readTaskTurnCoordinator,
+    readTaskTurnRecoveryProvenance,
     readWorkerLifetimeRecoveryProvenance,
     releaseTaskTurn,
     renewTaskTurnClaim,
@@ -87,6 +88,7 @@ export {
     type TaskTurnCoordinatorState,
     type TaskTurnRecoveryDisposition,
     type TaskTurnRecoveryReason,
+    type TaskTurnRecoveryProvenance,
     type TaskTurnRuntimeOwner,
     type WorkerLifetimeRecoveryProvenance,
 } from './orchestration/TaskTurnCoordinator.js';

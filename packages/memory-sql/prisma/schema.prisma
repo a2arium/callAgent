@@ -362,6 +362,7 @@ model AgentRun {
     parentTurnSeq    Int?      @map("parent_turn_seq")
     childCount       Int       @default(0) @map("child_count")
     turnCount        Int       @default(0) @map("turn_count")
+    logicalTurnCount Int?      @map("logical_turn_count")
     llmCallCount     Int       @default(0) @map("llm_call_count")
     memoryOpCount    Int       @default(0) @map("memory_op_count")
     knownCostUsd     Decimal?  @map("known_cost_usd") @db.Decimal(18, 6)

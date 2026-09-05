@@ -1,4 +1,4 @@
-export type AgentRunStatus = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'canceled' | 'cancelled' | 'unknown';
+export type AgentRunStatus = 'queued' | 'running' | 'waiting' | 'recovering' | 'completed' | 'failed' | 'canceled' | 'cancelled' | 'unknown';
 export type RunSeverity = 'success' | 'info' | 'warning' | 'error' | 'neutral';
 
 export type AgentRunListItem = {
@@ -10,6 +10,8 @@ export type AgentRunListItem = {
   finishedAt?: string;
   durationMs?: number;
   turns: number;
+  logicalTurns?: number;
+  cognitiveTurns?: number;
   children: number;
   llmCalls: number;
   memoryOps?: number;
@@ -151,7 +153,7 @@ export type TurnAttemptRun = {
   attemptKey?: string;
   attemptSeq?: number;
   disposition?: 'executed' | 'queued' | 'matching_replay' | 'superseded' |
-    'terminal_replay' | 'lease_expired_recovery_staged';
+    'terminal_replay' | 'lease_expired_recovery_staged' | 'worker_lifetime_lost_recovery_staged';
   claimId?: string;
   turnFence?: string;
   claimedGeneration?: string;
@@ -173,12 +175,31 @@ export type TurnAttemptRun = {
   startedAt?: string;
   finishedAt?: string;
   error?: unknown;
+  supersededReason?: 'lease_expired' | 'worker_lifetime_lost' | 'replaced';
+};
+
+export type TurnRecoveryRun = {
+  id: string;
+  reason: 'lease_expired' | 'worker_lifetime_lost';
+  state: 'staged' | 'consumed';
+  generation: string;
+  turnSeq: number;
+  deliveryKey: string;
+  sourceClaimId: string;
+  sourceFence: string;
+  replacementClaimId?: string;
+  replacementFence?: string;
+  sourceWorkerName?: string;
+  replacementWorkerName?: string;
+  stagedAt: string;
+  consumedAt?: string;
 };
 
 export type TurnRun = TurnAttemptRun & {
   turnSeq: number;
   severity: RunSeverity;
   attempts: TurnAttemptRun[];
+  recoveries?: TurnRecoveryRun[];
   cognitiveTurns?: CognitiveTurnRun[];
 };
 
@@ -370,6 +391,7 @@ export type TaskCoordinationView = {
     fence: string;
     ownerId: string;
     turnSeq: number;
+    claimedGeneration: string;
     phase: 'claimed' | 'executing' | 'committing';
     acquiredAt: string;
     heartbeatAt: string;

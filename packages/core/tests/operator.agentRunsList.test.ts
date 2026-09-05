@@ -476,6 +476,7 @@ describe('TaskEngine operator agent run list', () => {
                 status: 'completed',
                 childCount: 2,
                 turnCount: 3,
+                logicalTurnCount: 2,
                 llmCallCount: 1,
                 memoryOpCount: 4,
                 knownCostUsd: '0.125000',
@@ -528,6 +529,8 @@ describe('TaskEngine operator agent run list', () => {
                 status: 'completed',
                 children: 2,
                 turns: 3,
+                cognitiveTurns: 3,
+                logicalTurns: 2,
                 llmCalls: 1,
                 memoryOps: 4,
                 costUsd: 0.125,
@@ -1604,5 +1607,29 @@ describe('TaskEngine operator agent run list', () => {
                 reason: 'node_limit',
             }),
         ]);
+    });
+
+    it('reconciles missing logical-turn counts idempotently without changing cognitive counts', async () => {
+        const findMany = jest.fn()
+            .mockResolvedValueOnce([{
+                id: 'run-1', tenantId: 'default', taskId: 'task-1', rootTaskId: 'task-1',
+                scope: 'root', status: 'running', childCount: 0, turnCount: 4,
+                logicalTurnCount: null, llmCallCount: 0, memoryOpCount: 0, updatedAt: now,
+            }])
+            .mockResolvedValueOnce([]);
+        const updateMany = jest.fn(async () => ({ count: 1 }));
+        const groupBy = jest.fn(async () => [{ turnSeq: 1 }, { turnSeq: 2 }]);
+        const projection = new OperatorProjectionRepository({
+            agentRun: { findMany, updateMany }, turnRun: { groupBy },
+        } as never);
+
+        await expect(projection.reconcileLogicalTurnCounts({ batchSize: 10 })).resolves.toEqual({
+            scanned: 1, reconciled: 1,
+        });
+        expect(updateMany).toHaveBeenCalledWith(expect.objectContaining({
+            where: expect.objectContaining({ taskId: 'task-1', logicalTurnCount: null }),
+            data: { logicalTurnCount: 2 },
+        }));
+        expect(updateMany).not.toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ turnCount: expect.anything() }) }));
     });
 });

@@ -1,7 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { deriveGraphInsights, deriveStatus, normalizeRuntimeStatus } from './derive';
+import { deriveGraphInsights, deriveStatus, fleetLogicalTurnCount, normalizeRuntimeStatus } from './derive';
 import { semanticFailureFromTurns } from './semanticFailure';
 import type { AgentRunGraph, TurnRun } from '../types';
+
+describe('fleetLogicalTurnCount', () => {
+  it('uses logical turns instead of the legacy cognitive count', () => {
+    expect(fleetLogicalTurnCount({ turns: 4, logicalTurns: 2 })).toBe(2);
+    expect(fleetLogicalTurnCount({ turns: 4 })).toBe(4);
+  });
+});
 
 describe('deriveGraphInsights', () => {
   it('selects the deepest failed node and failure path', () => {

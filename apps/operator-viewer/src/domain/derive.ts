@@ -49,6 +49,8 @@ export function normalizeRuntimeStatus(status: string | undefined): RuntimeStatu
       return 'running';
     case 'waiting':
       return 'waiting';
+    case 'recovering':
+      return 'recovering';
     case 'completed':
     case 'success':
     case 'succeeded':
@@ -62,6 +64,10 @@ export function normalizeRuntimeStatus(status: string | undefined): RuntimeStatu
     default:
       return 'unknown';
   }
+}
+
+export function fleetLogicalTurnCount(run: Pick<AgentRunListItem, 'logicalTurns' | 'turns'>): number {
+  return run.logicalTurns ?? run.turns;
 }
 
 export function deriveStatus(input: {

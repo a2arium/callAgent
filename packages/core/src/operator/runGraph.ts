@@ -1,10 +1,10 @@
 import type { SessionManager } from '../orchestration/SessionManager.js';
 import { operatorPayloadEnvelope } from './payloadBudget.js';
-import { readTaskTurnCoordinator } from '../orchestration/TaskTurnCoordinator.js';
+import { readTaskTurnCoordinator, readTaskTurnRecoveryProvenance, type TaskTurnRecoveryProvenance } from '../orchestration/TaskTurnCoordinator.js';
 import { readDurableTaskTerminal } from '../orchestration/TaskLifecycle.js';
 import { readTaskSubmissionMetadata, type TaskSubmissionOrigin } from '../orchestration/TaskSubmission.js';
 
-export type AgentRunStatus = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'canceled' | 'unknown';
+export type AgentRunStatus = 'queued' | 'running' | 'waiting' | 'recovering' | 'completed' | 'failed' | 'canceled' | 'unknown';
 export type RunSeverity = 'success' | 'info' | 'warning' | 'error' | 'neutral';
 
 export type AgentRunGraph = {
@@ -82,6 +82,7 @@ export type TaskCoordinationView = {
         fence: string;
         ownerId: string;
         turnSeq: number;
+        claimedGeneration: string;
         phase: 'claimed' | 'executing' | 'committing';
         acquiredAt: string;
         heartbeatAt: string;
@@ -199,12 +200,31 @@ export type TurnAttemptRun = {
     startedAt?: string;
     finishedAt?: string;
     error?: unknown;
+    supersededReason?: 'lease_expired' | 'worker_lifetime_lost' | 'replaced';
+};
+
+export type TurnRecoveryRun = {
+    id: string;
+    reason: 'lease_expired' | 'worker_lifetime_lost';
+    state: 'staged' | 'consumed';
+    generation: string;
+    turnSeq: number;
+    deliveryKey: string;
+    sourceClaimId: string;
+    sourceFence: string;
+    replacementClaimId?: string;
+    replacementFence?: string;
+    sourceWorkerName?: string;
+    replacementWorkerName?: string;
+    stagedAt: string;
+    consumedAt?: string;
 };
 
 export type TurnRun = TurnAttemptRun & {
     turnSeq: number;
     severity: RunSeverity;
     attempts: TurnAttemptRun[];
+    recoveries?: TurnRecoveryRun[];
     cognitiveTurns?: CognitiveTurnRun[];
 };
 
@@ -424,10 +444,14 @@ export async function buildAgentRunGraph(
     const memoryOps = buildMemoryOps(params.taskId, events);
     const terminal = readDurableTaskTerminal(snapshot?.snapshot);
     const turnProjection = buildTurnRuns(params.taskId, driverRuns, events, memoryOps, terminal?.turnClaim);
-    const turns = applyAgentTerminalStatusToTurns(turnProjection.turns, [root, ...childNodes]);
+    const coordination = buildTaskCoordinationView(params.taskId, snapshot?.snapshot);
+    const turns = applyTaskTurnAuthority(
+        applyAgentTerminalStatusToTurns(turnProjection.turns, [root, ...childNodes]),
+        coordination,
+        readTaskTurnRecoveryProvenance((snapshot?.snapshot ?? {}) as Record<string, unknown>),
+    );
     const effects = buildEffectRuns(params.taskId, driverRuns, events);
     const graphEvents = buildGraphEvents(params.taskId, agentId ?? undefined, events, driverRuns);
-    const coordination = buildTaskCoordinationView(params.taskId, snapshot?.snapshot);
     if (terminal?.turnClaim && !turns.some((turn) => turn.authoritativeTerminal === true)) {
         coordination.issues = [...coordination.issues, 'terminal_projection_mismatch'];
         coordination.health = 'attention';
@@ -519,6 +543,7 @@ export function buildTaskCoordinationView(
                 fence: coordinator.active.fence,
                 ownerId: coordinator.active.ownerId,
                 turnSeq: coordinator.active.turnSeq,
+                claimedGeneration: coordinator.active.claimedGeneration,
                 phase: coordinator.active.phase,
                 acquiredAt: coordinator.active.acquiredAt,
                 heartbeatAt: coordinator.active.heartbeatAt,
@@ -1124,6 +1149,7 @@ export function groupTurnAttempts(attempts: TurnAttemptRun[]): {
             status,
             severity: severityForStatus(status, error),
             attempts: sorted,
+            recoveries: [],
             cognitiveTurns: [],
             ...(sorted.some((attempt) => attempt.authoritativeTerminal) ? { authoritativeTerminal: true } : {}),
             ...(earliestTimestamp(sorted.map((attempt) => attempt.startedAt)) ? {
@@ -1183,6 +1209,79 @@ function logicalTurnStatus(attempts: TurnAttemptRun[], primary: TurnAttemptRun):
     return primary.status;
 }
 
+export function applyTaskTurnAuthority(
+    turns: TurnRun[],
+    coordination: TaskCoordinationView,
+    recoveryProvenance: TaskTurnRecoveryProvenance[] = [],
+): TurnRun[] {
+    const recoveryByTurn = new Map<number, TurnRecoveryRun[]>();
+    for (const recovery of recoveryProvenance) {
+        const projected: TurnRecoveryRun = {
+            id: recovery.deliveryKey,
+            reason: recovery.reason,
+            state: recovery.replacementClaim ? 'consumed' : 'staged',
+            generation: recovery.generation,
+            turnSeq: recovery.turnSeq,
+            deliveryKey: recovery.deliveryKey,
+            sourceClaimId: recovery.sourceClaim.claimId,
+            sourceFence: recovery.sourceClaim.fence,
+            ...(recovery.replacementClaim ? {
+                replacementClaimId: recovery.replacementClaim.claimId,
+                replacementFence: recovery.replacementClaim.fence,
+                ...(recovery.replacementClaim.runtimeOwner?.workerName ? { replacementWorkerName: recovery.replacementClaim.runtimeOwner.workerName } : {}),
+            } : {}),
+            ...(recovery.sourceClaim.runtimeOwner?.workerName ? { sourceWorkerName: recovery.sourceClaim.runtimeOwner.workerName } : {}),
+            stagedAt: recovery.stagedAt,
+            ...(recovery.consumedAt ? { consumedAt: recovery.consumedAt } : {}),
+        };
+        recoveryByTurn.set(recovery.turnSeq, [...(recoveryByTurn.get(recovery.turnSeq) ?? []), projected]);
+    }
+    return turns.map((turn) => {
+        const recoveries = recoveryByTurn.get(turn.turnSeq) ?? [];
+        const active = coordination.active?.turnSeq === turn.turnSeq ? coordination.active : undefined;
+        if (turn.authoritativeTerminal) return { ...turn, recoveries };
+        if (active?.leaseState === 'live' || active?.leaseState === 'expiring') {
+            const attempts = turn.attempts.map((attempt) => {
+                if (attempt.claimId === active.claimId && attempt.turnFence === active.fence &&
+                    attempt.claimedGeneration === active.claimedGeneration) {
+                    const { finishedAt: _finishedAt, ...rest } = attempt;
+                    return { ...rest, status: 'running' as const, disposition: 'executed' as const };
+                }
+                if (attempt.claimedGeneration === active.claimedGeneration && compareFence(attempt.turnFence, active.fence) < 0 && !attempt.authoritativeTerminal) {
+                    return {
+                        ...attempt,
+                        status: 'completed' as const,
+                        disposition: 'superseded' as const,
+                        supersededReason: recoveryReasonForSource(recoveries, attempt.claimId, attempt.turnFence) ?? 'replaced' as const,
+                    };
+                }
+                return attempt;
+            });
+            const primary = attempts.find((attempt) => attempt.claimId === active.claimId && attempt.turnFence === active.fence) ?? turn;
+            return { ...turn, ...primary, id: turn.id, turnSeq: turn.turnSeq, status: 'running', severity: 'info', attempts, recoveries };
+        }
+        const recovering = coordination.state === 'recovering' &&
+            (active?.leaseState === 'expired' || coordination.dispatchIntent?.generation === turn.claimedGeneration ||
+                recoveries.some((item) => item.state === 'staged'));
+        return recovering
+            ? { ...turn, status: 'recovering', severity: 'warning', recoveries }
+            : { ...turn, recoveries };
+    });
+}
+
+function compareFence(left: string | undefined, right: string): number {
+    if (left === undefined || !/^\d+$/.test(left) || !/^\d+$/.test(right)) return -1;
+    const a = BigInt(left);
+    const b = BigInt(right);
+    return a < b ? -1 : a > b ? 1 : 0;
+}
+
+function recoveryReasonForSource(
+    recoveries: TurnRecoveryRun[], claimId: string | undefined, fence: string | undefined,
+): TurnAttemptRun['supersededReason'] | undefined {
+    return recoveries.find((item) => item.sourceClaimId === claimId && item.sourceFence === fence)?.reason;
+}
+
 function applyAgentTerminalStatusToTurns(turns: TurnRun[], nodes: AgentRunNode[]): TurnRun[] {
     const latestByTask = new Map<string, number>();
     for (const turn of turns) {
@@ -1232,7 +1331,7 @@ export function severityForStatus(status: AgentRunStatus, error?: unknown): RunS
     if (error !== undefined || status === 'failed') return 'error';
     if (status === 'completed') return 'success';
     if (status === 'running') return 'info';
-    if (status === 'waiting') return 'warning';
+    if (status === 'waiting' || status === 'recovering') return 'warning';
     return 'neutral';
 }
 
@@ -1317,10 +1416,11 @@ function mergeAttemptStatus(a: AgentRunStatus, b: AgentRunStatus): AgentRunStatu
         unknown: 0,
         queued: 1,
         running: 2,
-        waiting: 3,
-        completed: 4,
-        failed: 4,
-        canceled: 4,
+        recovering: 2,
+        waiting: 2,
+        completed: 3,
+        failed: 3,
+        canceled: 3,
     };
     return rank[b] > rank[a] ? b : a;
 }
@@ -1568,7 +1668,7 @@ function normalizeStatus(status: string | undefined | null): AgentRunStatus {
     if (status === 'canceled' || status === 'cancelled') {
         return 'canceled';
     }
-    if (status === 'running' || status === 'queued' || status === 'waiting') {
+    if (status === 'running' || status === 'queued' || status === 'waiting' || status === 'recovering') {
         return status;
     }
     return 'unknown';

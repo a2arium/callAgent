@@ -251,3 +251,9 @@ The original storage-clock root deadline is the only recovery limit. A deadline
 that expires while the worker recovery intent is unresolved produces
 `HATCHET_WORKER_RECOVERY_DEADLINE_EXCEEDED`. Arbitrary external calls outside
 registered effects cannot be rolled back and must use application idempotency.
+
+Operator preserves `task → logical segment → execution attempt → cognitive turn`.
+Recovery reuses the logical segment and adds a higher-fence attempt. Bounded
+`meta.turnRecoveries` metadata records the canonical dispatch key, reason, source claim,
+and optional replacement claim for diagnostics; the coordinator remains scheduling
+authority.

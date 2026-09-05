@@ -122,6 +122,106 @@ export type WorkerLifetimeRecoveryProvenance = {
     replacementFence?: string;
 };
 
+export type TaskTurnRecoveryProvenance = {
+    reason: TaskTurnRecoveryReason;
+    deliveryKey: string;
+    generation: string;
+    turnSeq: number;
+    stagedAt: string;
+    sourceClaim: ActiveTaskTurnClaim;
+    replacementClaim?: TaskTurnClaim;
+    consumedAt?: string;
+};
+
+export function readTaskTurnRecoveryProvenance(snapshot: Record<string, unknown>): TaskTurnRecoveryProvenance[] {
+    const meta = asRecord(snapshot.meta);
+    const rows = Array.isArray(meta?.turnRecoveries) ? meta.turnRecoveries : [];
+    const current = rows.flatMap((value) => {
+        const row = asRecord(value);
+        if (!row || (row.reason !== 'lease_expired' && row.reason !== 'worker_lifetime_lost') ||
+            typeof row.deliveryKey !== 'string' || typeof row.generation !== 'string' ||
+            !Number.isSafeInteger(row.turnSeq) || typeof row.stagedAt !== 'string') return [];
+        let sourceClaim: ActiveTaskTurnClaim;
+        let replacement: ActiveTaskTurnClaim | undefined;
+        try {
+            sourceClaim = readRecoveryProvenanceClaim(row.sourceClaim, true) as ActiveTaskTurnClaim;
+            replacement = row.replacementClaim === undefined
+                ? undefined
+                : readRecoveryProvenanceClaim(row.replacementClaim, false) as ActiveTaskTurnClaim;
+        } catch {
+            return [];
+        }
+        return [{
+            reason: row.reason as TaskTurnRecoveryReason,
+            deliveryKey: row.deliveryKey,
+            generation: row.generation,
+            turnSeq: row.turnSeq as number,
+            stagedAt: row.stagedAt,
+            sourceClaim,
+            ...(replacement ? { replacementClaim: replacement } : {}),
+            ...(typeof row.consumedAt === 'string' ? { consumedAt: row.consumedAt } : {}),
+        }];
+    });
+    const identities = new Set(current.map((row) => `${row.sourceClaim.claimId}:${row.sourceClaim.fence}`));
+    const legacy = readWorkerLifetimeRecoveryProvenance(snapshot).flatMap((row): TaskTurnRecoveryProvenance[] => {
+        if (identities.has(`${row.sourceClaimId}:${row.sourceFence}`)) return [];
+        const sourceClaim: ActiveTaskTurnClaim = {
+            claimId: row.sourceClaimId,
+            fence: row.sourceFence,
+            ownerId: 'legacy-worker',
+            requestKey: `legacy:${row.sourceClaimId}`,
+            claimedGeneration: row.generation,
+            turnSeq: row.turnSeq,
+            phase: 'executing',
+            runtimeSurface: 'hatchet',
+            acquiredAt: row.stagedAt,
+            heartbeatAt: row.stagedAt,
+            expiresAt: row.stagedAt,
+            runtimeOwner: {
+                installationId: 'legacy', instanceId: 'legacy', workerName: 'legacy-worker',
+                rootProviderRunId: row.sourceProviderRunId,
+            },
+        };
+        return [{
+            reason: 'worker_lifetime_lost',
+            deliveryKey: `legacy:${row.generation}:${row.turnSeq}`,
+            generation: row.generation,
+            turnSeq: row.turnSeq,
+            stagedAt: row.stagedAt,
+            sourceClaim,
+            ...(row.replacementClaimId && row.replacementFence ? {
+                replacementClaim: {
+                    ...sourceClaim,
+                    claimId: row.replacementClaimId,
+                    fence: row.replacementFence,
+                    ownerId: 'legacy-replacement-worker',
+                    runtimeOwner: {
+                        installationId: 'legacy', instanceId: 'legacy-replacement', workerName: 'legacy-replacement-worker',
+                        ...(row.replacementProviderRunId ? { rootProviderRunId: row.replacementProviderRunId } : {}),
+                    },
+                },
+                consumedAt: row.stagedAt,
+            } : {}),
+        }];
+    });
+    return [...current, ...legacy]
+        .sort((a, b) => a.stagedAt.localeCompare(b.stagedAt))
+        .slice(-16);
+}
+
+function readRecoveryProvenanceClaim(value: unknown, requirePhase: boolean): TaskTurnClaim {
+    const claim = asRecord(value);
+    if (!claim || typeof claim.claimId !== 'string' || typeof claim.fence !== 'string' ||
+        typeof claim.ownerId !== 'string' || typeof claim.requestKey !== 'string' ||
+        typeof claim.claimedGeneration !== 'string' || !Number.isSafeInteger(claim.turnSeq) ||
+        typeof claim.acquiredAt !== 'string' || typeof claim.heartbeatAt !== 'string' ||
+        typeof claim.expiresAt !== 'string' || !['direct', 'in_process', 'hatchet'].includes(String(claim.runtimeSurface)) ||
+        (requirePhase && !['claimed', 'executing', 'committing'].includes(String(claim.phase)))) {
+        throw new Error('Invalid recovery provenance claim');
+    }
+    return claim as unknown as TaskTurnClaim;
+}
+
 export function readWorkerLifetimeRecoveryProvenance(snapshot: Record<string, unknown>): WorkerLifetimeRecoveryProvenance[] {
     const meta = asRecord(snapshot.meta);
     const rows = Array.isArray(meta?.workerLifetimeRecoveries) ? meta.workerLifetimeRecoveries : [];
@@ -164,6 +264,43 @@ function appendWorkerLifetimeRecoveryProvenance(
         stagedAt,
     });
     return { ...snapshot, meta: { ...meta, workerLifetimeRecoveries: rows.slice(-8) } };
+}
+
+function appendTaskTurnRecoveryProvenance(
+    snapshot: Record<string, unknown>,
+    reason: TaskTurnRecoveryReason,
+    sourceClaim: ActiveTaskTurnClaim,
+    stagedAt: string,
+    deliveryKey: string,
+): Record<string, unknown> {
+    const meta = asRecord(snapshot.meta) ?? {};
+    const rows = readTaskTurnRecoveryProvenance(snapshot).filter((row) =>
+        row.sourceClaim.claimId !== sourceClaim.claimId || row.sourceClaim.fence !== sourceClaim.fence
+    );
+    rows.push({
+        reason,
+        deliveryKey,
+        generation: sourceClaim.claimedGeneration,
+        turnSeq: sourceClaim.turnSeq,
+        stagedAt,
+        sourceClaim,
+    });
+    return { ...snapshot, meta: { ...meta, turnRecoveries: rows.slice(-16) } };
+}
+
+function recordTaskTurnRecoveryReplacement(
+    snapshot: Record<string, unknown>,
+    sourceClaim: ActiveTaskTurnClaim,
+    replacementClaim: TaskTurnClaim,
+    consumedAt: string,
+): Record<string, unknown> {
+    const meta = asRecord(snapshot.meta) ?? {};
+    const rows = readTaskTurnRecoveryProvenance(snapshot).map((row) =>
+        row.sourceClaim.claimId === sourceClaim.claimId && row.sourceClaim.fence === sourceClaim.fence
+            ? { ...row, replacementClaim, consumedAt }
+            : row
+    );
+    return { ...snapshot, meta: { ...meta, turnRecoveries: rows.slice(-16) } };
 }
 
 function recordWorkerLifetimeReplacement(
@@ -574,7 +711,13 @@ export function recoverExpiredTaskTurnClaimInSnapshot(
         },
     };
     return {
-        snapshot: writeState(snapshot, { ...state, active: undefined, dispatchIntent }),
+        snapshot: appendTaskTurnRecoveryProvenance(
+            writeState(snapshot, { ...state, active: undefined, dispatchIntent }),
+            'lease_expired',
+            active,
+            params.storageNow,
+            dispatchIntent.deliveryKey,
+        ),
         disposition: 'recovery_staged',
         sourceClaim: active,
         recoveryLagMs: Math.max(0, nowMs - Date.parse(active.expiresAt)),
@@ -633,7 +776,13 @@ export function recoverWorkerLostTaskTurnClaimInSnapshot(
             stagedAt: params.storageNow,
         },
     };
-    const stagedSnapshot = writeState(snapshot, { ...state, active: undefined, dispatchIntent });
+    const stagedSnapshot = appendTaskTurnRecoveryProvenance(
+        writeState(snapshot, { ...state, active: undefined, dispatchIntent }),
+        'worker_lifetime_lost',
+        active,
+        params.storageNow,
+        dispatchIntent.deliveryKey,
+    );
     return {
         snapshot: appendWorkerLifetimeRecoveryProvenance(stagedSnapshot, active, params.storageNow),
         disposition: 'recovery_staged',
@@ -1085,6 +1234,14 @@ export async function requestTaskTurn(params: {
                     claimedSnapshot,
                     current.dispatchIntent.recovery.sourceClaim,
                     claim,
+                );
+            }
+            if (current.dispatchIntent?.recovery !== undefined) {
+                claimedSnapshot = recordTaskTurnRecoveryReplacement(
+                    claimedSnapshot,
+                    current.dispatchIntent.recovery.sourceClaim,
+                    claim,
+                    storageNow,
                 );
             }
             if (claimGeneration === 1n) {
