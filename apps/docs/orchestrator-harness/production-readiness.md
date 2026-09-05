@@ -115,6 +115,13 @@ Production must make overload explicit and bounded.
   `HATCHET_WORKER_STREAM_UNAVAILABLE`, and be replaced by the deployment
   supervisor. Schedule REST health is a separate check, not evidence that the
   worker can renew durable work.
+- Stop timer and turn reconciliation before draining a failed worker, propagate
+  one worker-lifetime abort signal to every active segment, and enforce a bounded
+  process-exit deadline. A callback that ignores cancellation must not keep the
+  old worker process alive.
+- Preserve `taskId:turn-request:generation` as the recovery key. Recovery hints
+  reduce wake latency, but only the authoritative snapshot CAS may consume the
+  intent and install a higher-fence replacement claim.
 - Reconcile provider-terminal `driver_runs` into the fenced durable snapshot,
   final status outbox, and semantic run model. The sole permitted terminal
   correction is a provider failure observed before an `active_run_timeout`;
@@ -238,9 +245,17 @@ These gates must be automated or repeatable runbooks with recorded results.
 ### Gate P6 — Rolling Upgrade and Cutover
 
 - Rolling worker upgrade with active waits, timers, and child calls.
+- Changes to the internal root/segment recovery payload require a coordinated
+  worker replacement unless their release explicitly documents mixed-version
+  compatibility; old roots that ignore recovery hints must not overlap new
+  workers.
 - Live cutover from in-process waits/timers to Hatchet mode with no lost wakes,
   no duplicate effects, and a rollback runbook.
 - Cold-start recovery after all workers are stopped while tasks are waiting.
+- Treat a single polled Hatchet `FAILED` status as provisional during worker
+  replacement. Provider-terminal reconciliation confirms the same failure on
+  a later interval before making it an authoritative CallAgent task failure;
+  a recovered non-failed status clears the pending observation.
 - Expire an executing turn lease and verify that the indexed scanner creates a
   same-generation recovery dispatch within one healthy scan interval. The old
   fence must reject commits/effects, the replacement must retain `turnSeq` and

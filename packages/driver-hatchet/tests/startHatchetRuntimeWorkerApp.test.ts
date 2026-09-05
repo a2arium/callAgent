@@ -1,5 +1,8 @@
 import { describe, expect, it, jest } from '@jest/globals';
-import { startHatchetWorkerUntilReady } from '../src/startHatchetRuntimeWorkerApp.js';
+import {
+    resolveWorkerShutdownGraceMs,
+    startHatchetWorkerUntilReady,
+} from '../src/startHatchetRuntimeWorkerApp.js';
 
 describe('startHatchetWorkerUntilReady', () => {
     it('reports ready without waiting for Hatchet’s long-lived start loop to end', async () => {
@@ -23,5 +26,19 @@ describe('startHatchetWorkerUntilReady', () => {
         finishWorker();
         await running;
         expect(settled).toBe(true);
+    });
+});
+
+describe('resolveWorkerShutdownGraceMs', () => {
+    it('defaults to thirty seconds and accepts a positive override', () => {
+        expect(resolveWorkerShutdownGraceMs({})).toBe(30_000);
+        expect(resolveWorkerShutdownGraceMs({ CALLAGENT_WORKER_SHUTDOWN_GRACE_MS: '45000' })).toBe(45_000);
+    });
+
+    it('rejects invalid shutdown deadlines', () => {
+        expect(() => resolveWorkerShutdownGraceMs({ CALLAGENT_WORKER_SHUTDOWN_GRACE_MS: '0' }))
+            .toThrow('must be a positive integer');
+        expect(() => resolveWorkerShutdownGraceMs({ CALLAGENT_WORKER_SHUTDOWN_GRACE_MS: 'later' }))
+            .toThrow('must be a positive integer');
     });
 });

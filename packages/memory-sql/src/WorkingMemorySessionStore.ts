@@ -39,6 +39,12 @@ export type RunnableTurnRequest = {
     generation: string;
     deliveryKey: string;
     runtimeSurface: 'direct' | 'in_process' | 'hatchet';
+    recoveryHint?: {
+        reason: 'lease_expired';
+        generation: string;
+        deliveryKey: string;
+        turnSeq: number;
+    };
 };
 
 export type RunnableTurnRequestCursor = {
@@ -382,6 +388,8 @@ export class WorkingMemorySessionStore {
             generation: string;
             deliveryKey: string;
             runtimeSurface: string;
+            recoveryReason: string | null;
+            recoveryTurnSeq: string | null;
         }>>(Prisma.sql`
             SELECT
                 "tenant_id" AS "tenantId",
@@ -391,7 +399,9 @@ export class WorkingMemorySessionStore {
                 snapshot #>> '{meta,turnCoordinator,dispatchIntent,createdAt}' AS "createdAt",
                 snapshot #>> '{meta,turnCoordinator,dispatchIntent,generation}' AS generation,
                 snapshot #>> '{meta,turnCoordinator,dispatchIntent,deliveryKey}' AS "deliveryKey",
-                snapshot #>> '{meta,turnCoordinator,dispatchIntent,runtimeSurface}' AS "runtimeSurface"
+                snapshot #>> '{meta,turnCoordinator,dispatchIntent,runtimeSurface}' AS "runtimeSurface",
+                snapshot #>> '{meta,turnCoordinator,dispatchIntent,recovery,reason}' AS "recoveryReason",
+                snapshot #>> '{meta,turnCoordinator,dispatchIntent,turnSeq}' AS "recoveryTurnSeq"
             FROM "wm_sessions"
             WHERE snapshot #> '{meta,turnCoordinator,dispatchIntent}' IS NOT NULL
               AND snapshot #> '{meta,turnCoordinator,active}' IS NULL
@@ -420,6 +430,16 @@ export class WorkingMemorySessionStore {
                 });
                 return [];
             }
+            const recoveryTurnSeq = row.recoveryTurnSeq === null ? undefined : Number(row.recoveryTurnSeq);
+            const recoveryHint = row.recoveryReason === 'lease_expired' &&
+                Number.isSafeInteger(recoveryTurnSeq) && recoveryTurnSeq! > 0
+                ? {
+                      reason: 'lease_expired' as const,
+                      generation: row.generation,
+                      deliveryKey: row.deliveryKey,
+                      turnSeq: recoveryTurnSeq!,
+                  }
+                : undefined;
             return [{
                 tenantId: row.tenantId,
                 sessionId: row.sessionId,
@@ -429,6 +449,7 @@ export class WorkingMemorySessionStore {
                 generation: row.generation,
                 deliveryKey: row.deliveryKey,
                 runtimeSurface: row.runtimeSurface,
+                ...(recoveryHint ? { recoveryHint } : {}),
             }];
         });
     }

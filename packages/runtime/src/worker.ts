@@ -35,7 +35,7 @@ async function main(): Promise<void> {
     await runtime.done.catch(async (error) => {
         console.error('HATCHET_WORKER_STREAM_UNAVAILABLE', { message: error instanceof Error ? error.message : String(error) });
         await runtime.stop();
-        process.exitCode = 1;
+        process.exit(1);
     });
 }
 

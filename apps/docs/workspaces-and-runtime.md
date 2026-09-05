@@ -142,6 +142,25 @@ systemd, Kubernetes, and so on); the replacement worker registers with a new
 identity and durable work re-enters through the existing generation/fence
 rules. Do not try to restart individual action listeners inside a live process.
 
+Worker loss also stops timer and turn-request reconciliation and aborts every
+active CallAgent segment owned by that process. The runtime waits at most
+`CALLAGENT_WORKER_SHUTDOWN_GRACE_MS` (30 seconds by default) before exiting
+non-zero. A callback that ignores its `AbortSignal` is therefore stopped by the
+process boundary. Deploy runtime protocol changes through a coordinated worker
+replacement; do not leave old and new CallAgent workers active together.
+
+An expired lease keeps the canonical delivery key
+`taskId:turn-request:generation`. Recovery preserves the logical turn and
+generation while admission allocates a new claim ID and higher fence. Hatchet
+event payloads are wake-up hints only; the SQL snapshot CAS remains authoritative.
+Repeated stale delivery is safe and cannot create another owner.
+
+CallAgent checks cancellation before its artifact, memory, progress, and
+registered-effect mutations. Snapshot commits, progress, and effect registration
+also retain durable claim/fence checks. An arbitrary external API call cannot be
+rolled back; put such mutations behind registered effects and stable idempotency
+keys.
+
 `/ready` returns `503 HATCHET_WORKER_STREAM_UNAVAILABLE` while no fresh lease
 exists. `HATCHET_SCHEDULE_API_UNAVAILABLE` remains a separate code for the
 schedule REST API. API-only installations with workers managed elsewhere can

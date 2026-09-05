@@ -90,6 +90,12 @@ expiry** with the preserved generation and turn number. The expired attempt is
 under the same `turnSeq`, not another business turn. Late events from the expired
 claim cannot restore ownership.
 
+Queued Hatchet segments are coordination attempts, not business turns. Operator
+groups them under their associated logical turn and derives the headline state
+from the snapshot's active claim or recovery intent. Worker-stream loss appears
+as runtime unavailability/restart activity and does not itself make the agent
+terminal.
+
 ### `TurnRun`
 
 One durable segment. This is debug detail under an agent node, not a top-level product concept.

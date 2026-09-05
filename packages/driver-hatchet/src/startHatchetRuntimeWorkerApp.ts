@@ -15,12 +15,21 @@ import { reconcileMaintenanceCrons } from './maintenance.js';
 import { startWorkerHealthMonitor, type WorkerHealthMonitor } from './workerHealth.js';
 import { ProviderTerminalReconciler } from './providerTerminalReconciler.js';
 import { randomUUID } from 'node:crypto';
+import {
+    HatchetExecutionSupervisor,
+    HatchetWorkerStreamUnavailableError,
+} from './hatchetExecutionSupervisor.js';
 
 export type HatchetRuntimeWorkerApp = {
     composition: RuntimeCompositionRootInternal;
     /** Rejects when Hatchet's long-lived worker loop ends unexpectedly. */
     done: Promise<never>;
-    health: () => { state: 'ready' | 'failed' | 'stopped'; lastError?: string };
+    health: () => {
+        state: 'ready' | 'failed' | 'stopping' | 'stopped';
+        lastError?: string;
+        activeExecutions: number;
+        drainTimedOut: boolean;
+    };
     shutdown: () => Promise<void>;
 };
 
@@ -29,6 +38,18 @@ export type StartHatchetRuntimeWorkerAppOptions = {
     natsUrl?: string;
     registerAgents?: BootstrapCompositionRootParams['registerAgents'];
 };
+
+export const DEFAULT_WORKER_SHUTDOWN_GRACE_MS = 30_000;
+
+export function resolveWorkerShutdownGraceMs(env: NodeJS.ProcessEnv = process.env): number {
+    const raw = env.CALLAGENT_WORKER_SHUTDOWN_GRACE_MS;
+    if (raw === undefined || raw.length === 0) return DEFAULT_WORKER_SHUTDOWN_GRACE_MS;
+    const value = Number(raw);
+    if (!Number.isSafeInteger(value) || value <= 0) {
+        throw new Error('CALLAGENT_WORKER_SHUTDOWN_GRACE_MS must be a positive integer');
+    }
+    return value;
+}
 
 /** Starts Hatchet's long-lived loop and waits only for its startup handshake. */
 export async function startHatchetWorkerUntilReady(
@@ -70,6 +91,7 @@ async function importMemorySql(): Promise<MemorySqlModule> {
 export async function startHatchetRuntimeWorkerApp(
     options?: StartHatchetRuntimeWorkerAppOptions
 ): Promise<HatchetRuntimeWorkerApp> {
+    const shutdownGraceMs = resolveWorkerShutdownGraceMs();
     if (!process.env.MEMORY_DATABASE_URL) {
         throw new Error('MEMORY_DATABASE_URL is required for hatchet runtime worker');
     }
@@ -105,11 +127,12 @@ export async function startHatchetRuntimeWorkerApp(
     });
 
     const workerName = `${options?.workerName ?? process.env.HATCHET_WORKER_NAME ?? 'aplret-runtime-worker'}-${randomUUID().slice(0, 8)}`;
+    const executionSupervisor = new HatchetExecutionSupervisor(composition.turnExecutor);
     const started = await startOutboxWorker({
         eventBus,
         prisma: sessionStore.getPrismaClient(),
         sessionManager: budgetEvents,
-        turnExecutor: composition.turnExecutor,
+        turnExecutor: executionSupervisor,
         onTaskRunTimeout: (params) => composition.engine.handleTaskRunTimeout(params),
         submitTask: (params) => composition.engine.submitTask(params),
         workerName,
@@ -123,8 +146,11 @@ export async function startHatchetRuntimeWorkerApp(
     let workerRun: Promise<void>;
     let healthMonitor: WorkerHealthMonitor | undefined;
     let terminalTimer: ReturnType<typeof setInterval> | undefined;
-    let state: 'ready' | 'failed' | 'stopped' = 'ready';
+    let state: 'ready' | 'failed' | 'stopping' | 'stopped' = 'ready';
     let lastError: string | undefined;
+    let drainTimedOut = false;
+    let workerStopPromise: Promise<void> | undefined;
+    let shutdownPromise: Promise<void> | undefined;
     let rejectDone!: (error: Error) => void;
     const done = new Promise<never>((_resolve, reject) => { rejectDone = reject; });
     // The caller owns this promise and installs the process-level failure
@@ -136,11 +162,15 @@ export async function startHatchetRuntimeWorkerApp(
         lastError = error instanceof Error ? error.message : String(error);
         console.error('HATCHET_WORKER_STREAM_UNAVAILABLE', { message: lastError });
         if (terminalTimer) clearInterval(terminalTimer);
+        started.stopReconcilers();
         void healthMonitor?.stop();
-        // Do not keep a damaged worker accepting new work while its process
-        // supervisor prepares a replacement instance.
-        void started.worker.stop().catch(() => undefined);
-        rejectDone(error instanceof Error ? error : new Error(lastError));
+        const failure = error instanceof HatchetWorkerStreamUnavailableError
+            ? error
+            : new HatchetWorkerStreamUnavailableError(lastError);
+        executionSupervisor.abortAll(failure);
+        workerStopPromise ??= started.worker.stop();
+        void workerStopPromise.catch(() => undefined);
+        rejectDone(failure);
     }
     try {
         ({ workerRun } = await startHatchetWorkerUntilReady(started.worker));
@@ -167,6 +197,8 @@ export async function startHatchetRuntimeWorkerApp(
         );
         if (started.maintenance) await reconcileMaintenanceCrons(started.hatchet, started.maintenance.task, started.maintenance.service);
     } catch (error) {
+        started.stopReconcilers();
+        executionSupervisor.abortAll(new HatchetWorkerStreamUnavailableError('Hatchet worker startup failed'));
         await started.worker.stop().catch(() => undefined);
         composition.shutdown();
         await closeNats();
@@ -177,19 +209,54 @@ export async function startHatchetRuntimeWorkerApp(
     return {
         composition,
         done,
-        health: () => ({ state, ...(lastError ? { lastError } : {}) }),
-        shutdown: async () => {
-            try {
-                if (state === 'ready') state = 'stopped';
+        health: () => ({
+            state,
+            ...(lastError ? { lastError } : {}),
+            activeExecutions: executionSupervisor.activeCount,
+            drainTimedOut,
+        }),
+        shutdown: () => {
+            shutdownPromise ??= (async () => {
+                const shutdownDeadline = Date.now() + shutdownGraceMs;
+                if (state === 'ready') state = 'stopping';
                 if (terminalTimer) clearInterval(terminalTimer);
-                await healthMonitor?.stop();
-                await started.worker.stop();
-                await workerRun.catch(() => undefined);
-            } finally {
+                started.stopReconcilers();
+                executionSupervisor.abortAll(
+                    state === 'failed'
+                        ? new HatchetWorkerStreamUnavailableError(lastError)
+                        : new Error('CallAgent worker shutdown requested')
+                );
+                workerStopPromise ??= started.worker.stop();
+                const cleanup = Promise.allSettled([
+                    healthMonitor?.stop(),
+                    workerStopPromise,
+                    workerRun.catch(() => undefined),
+                    executionSupervisor.drain(shutdownGraceMs).then((result) => {
+                        drainTimedOut = !result.drained;
+                    }),
+                ]);
+                await raceWithTimeout(cleanup, shutdownGraceMs);
+                if (executionSupervisor.activeCount > 0) drainTimedOut = true;
                 composition.shutdown();
-                await closeNats();
-                await sessionStore.close();
-            }
+                await raceWithTimeout(
+                    Promise.allSettled([closeNats(), sessionStore.close()]),
+                    Math.max(0, shutdownDeadline - Date.now())
+                );
+                state = 'stopped';
+            })();
+            return shutdownPromise;
         },
     };
+}
+
+async function raceWithTimeout(promise: Promise<unknown>, timeoutMs: number): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+        promise,
+        new Promise<void>((resolve) => {
+            timer = setTimeout(resolve, timeoutMs);
+            timer.unref?.();
+        }),
+    ]);
+    if (timer) clearTimeout(timer);
 }

@@ -96,6 +96,7 @@ export async function startOutboxWorker(params: {
     worker: StartedHatchetWorker;
     hatchet: HatchetClient;
     maintenance?: { service: WorkspaceMaintenanceService; task: ReturnType<typeof createMaintenanceTask> };
+    stopReconcilers: () => void;
 }> {
     rejectObsoleteRuntimeConfiguration();
     assertSharedOutboxEventBus(params.eventBus);
@@ -167,17 +168,28 @@ export async function startOutboxWorker(params: {
             ...(scheduleDispatchTask ? [scheduleDispatchTask] : []),
             ...(maintenanceTask ? [maintenanceTask] : []),
         ]);
-        new TimerReconciler(runtimeTimers, timerFireTask).start();
+        const timerReconciler = new TimerReconciler(runtimeTimers, timerFireTask);
+        timerReconciler.start();
+        let turnRequestReconciler: TurnRequestReconciler | undefined;
         if (params.sessionManager) {
-            new TurnRequestReconciler(params.sessionManager, events, {
+            turnRequestReconciler = new TurnRequestReconciler(params.sessionManager, events, {
                 rootTask: sharedTask,
-            }).start();
+            });
+            turnRequestReconciler.start();
         }
-        return { worker, hatchet, maintenance: maintenanceTask ? { service: maintenance, task: maintenanceTask } : undefined };
+        return {
+            worker,
+            hatchet,
+            maintenance: maintenanceTask ? { service: maintenance, task: maintenanceTask } : undefined,
+            stopReconcilers: () => {
+                timerReconciler.stop();
+                turnRequestReconciler?.stop();
+            },
+        };
     } else {
         const worker = await hatchet.worker(params.workerName ?? 'aplret-outbox-worker');
         await worker.registerWorkflows([outboxDispatchTask, timerFireTask]);
-        return { worker, hatchet };
+        return { worker, hatchet, stopReconcilers: () => undefined };
     }
 }
 

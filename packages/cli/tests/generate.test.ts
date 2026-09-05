@@ -30,6 +30,7 @@ describe('CallAgent project and workspace generation', () => {
         const envExample = fs.readFileSync(path.join(workspace, '.env.example'), 'utf8');
         expect(envExample).toContain('HATCHET_CLIENT_TOKEN=replace-with-hatchet-api-token');
         expect(envExample).toContain('BETTER_AUTH_SECRET=replace-with-at-least-32-random-characters');
+        expect(envExample).toContain('CALLAGENT_WORKER_SHUTDOWN_GRACE_MS=30000');
         const workspacePackage = JSON.parse(fs.readFileSync(path.join(workspace, 'package.json'), 'utf8')) as { scripts: Record<string, string> };
         expect(workspacePackage.scripts).toMatchObject({ start: 'callagent start', dev: 'callagent start', 'db:setup': 'callagent db setup', 'infra:up': 'callagent infra up' });
         const readme = fs.readFileSync(path.join(workspace, 'README.md'), 'utf8');
@@ -39,6 +40,7 @@ describe('CallAgent project and workspace generation', () => {
         expect(readme).toContain('http://127.0.0.1:8790/operator');
         expect(readme).toContain('Settings → API Tokens');
         expect(readme).toContain('UNAUTHENTICATED: invalid auth token');
+        expect(readme).toContain('CALLAGENT_WORKER_SHUTDOWN_GRACE_MS');
     });
 
     test('always uses publishable semver ranges, including inside the CallAgent repository', async () => {

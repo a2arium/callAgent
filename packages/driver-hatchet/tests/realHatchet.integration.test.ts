@@ -185,6 +185,13 @@ describeRealHatchet('single-protocol real Hatchet integration', () => {
                 return details.run.output as TaskTaskOutput;
             }
             if (details.run.status === 'FAILED' || details.run.status === 'CANCELLED') {
+                if (
+                    details.run.status === 'FAILED'
+                    && details.run.errorMessage?.startsWith('Could not send task to worker')
+                ) {
+                    await new Promise((resolve) => setTimeout(resolve, 250));
+                    continue;
+                }
                 throw new Error(`Hatchet run ${runId} ended as ${details.run.status}: ${details.run.errorMessage ?? 'no error'}`);
             }
             await new Promise((resolve) => setTimeout(resolve, 250));

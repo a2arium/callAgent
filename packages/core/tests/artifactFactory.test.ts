@@ -151,4 +151,32 @@ describe('createArtifactFactory', () => {
         await artifacts.retainIds(['artifact-1', 'artifact-2'], 'checkpoint:new');
         expect(retainArtifacts).toHaveBeenCalledWith('tenant-a', ['artifact-1', 'artifact-2'], 'checkpoint:new');
     });
+
+    it('checks mutation ownership again after an artifact finishes loading', async () => {
+        const { cache } = createArtifactCache();
+        const retainArtifact = jest.fn(async () => undefined);
+        (cache as any).retainArtifact = retainArtifact;
+        let allowed = true;
+        const artifacts = createArtifactFactory({
+            tenantId: 'tenant-a',
+            resolveCache: () => cache,
+            assertMutationAllowed: () => {
+                if (!allowed) throw Object.assign(new Error('worker stopped'), {
+                    code: 'HATCHET_WORKER_STREAM_UNAVAILABLE',
+                });
+            },
+        });
+        const artifact = artifacts.text('value');
+        const lateArtifact = artifacts.create<string>();
+        await artifact.load();
+        allowed = false;
+
+        await expect(lateArtifact.set('late')).rejects.toMatchObject({
+            code: 'HATCHET_WORKER_STREAM_UNAVAILABLE',
+        });
+        await expect(artifacts.retain(artifact, 'checkpoint:1')).rejects.toMatchObject({
+            code: 'HATCHET_WORKER_STREAM_UNAVAILABLE',
+        });
+        expect(retainArtifact).not.toHaveBeenCalled();
+    });
 });

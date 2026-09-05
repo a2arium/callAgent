@@ -98,6 +98,13 @@ export type SegmentTaskOutput = JsonObject & {
     claimedGeneration?: string;
     turnSeq?: number;
     associatedTurnSeq?: number;
+    recoveryHint?: {
+        reason: 'lease_expired';
+        generation: string;
+        deliveryKey: string;
+        turnSeq: number;
+    };
+    turnAvailableAt?: string;
 };
 
 export type SegmentTaskDeps = {
@@ -256,6 +263,8 @@ function toSegmentTaskOutput(result: SegmentResult): SegmentTaskOutput {
         ...(result.turnTraceId !== undefined ? { turnTraceId: result.turnTraceId } : {}),
         ...(result.turnDisposition !== undefined ? { turnDisposition: result.turnDisposition } : {}),
         ...(result.associatedTurnSeq !== undefined ? { associatedTurnSeq: result.associatedTurnSeq } : {}),
+        ...(result.recoveryHint !== undefined ? { recoveryHint: result.recoveryHint } : {}),
+        ...(result.turnAvailableAt !== undefined ? { turnAvailableAt: result.turnAvailableAt } : {}),
         ...(result.turnClaim !== undefined ? {
             claimId: result.turnClaim.claimId,
             turnFence: result.turnClaim.fence,

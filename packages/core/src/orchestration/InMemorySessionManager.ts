@@ -30,10 +30,12 @@ type ScannableCoordinator = {
     };
     dispatchIntent?: {
         generation: string;
+        turnSeq?: number;
         deliveryKey: string;
         runtimeSurface: 'direct' | 'in_process' | 'hatchet';
         createdAt: string;
         enqueuedAt?: string;
+        recovery?: { reason: 'lease_expired' };
     };
 };
 
@@ -56,10 +58,16 @@ function readTurnCoordinatorForScan(snapshot: Record<string, unknown>): Scannabl
             (intent.runtimeSurface === 'direct' || intent.runtimeSurface === 'in_process' || intent.runtimeSurface === 'hatchet')) {
             dispatchIntent = {
                 generation: intent.generation,
+                ...(Number.isSafeInteger(intent.turnSeq) && (intent.turnSeq as number) > 0
+                    ? { turnSeq: intent.turnSeq as number }
+                    : {}),
                 deliveryKey: intent.deliveryKey,
                 runtimeSurface: intent.runtimeSurface,
                 createdAt: intent.createdAt,
                 ...(typeof intent.enqueuedAt === 'string' ? { enqueuedAt: intent.enqueuedAt } : {}),
+                ...(isLeaseExpiredRecovery(intent.recovery)
+                    ? { recovery: { reason: 'lease_expired' as const } }
+                    : {}),
             };
         }
     }
@@ -69,6 +77,11 @@ function readTurnCoordinatorForScan(snapshot: Record<string, unknown>): Scannabl
         ...(candidate.active !== undefined ? { active: candidate.active as ScannableCoordinator['active'] } : {}),
         ...(dispatchIntent ? { dispatchIntent } : {}),
     };
+}
+
+function isLeaseExpiredRecovery(value: unknown): boolean {
+    return value !== null && typeof value === 'object' && !Array.isArray(value) &&
+        (value as Record<string, unknown>).reason === 'lease_expired';
 }
 
 function compareRunnableCursor(row: RunnableTurnRequest, cursor: RunnableTurnRequestCursor): number {
@@ -208,6 +221,16 @@ export class InMemorySessionManager implements IWorkingMemorySessionStore {
                 generation: coordinator.dispatchIntent.generation,
                 deliveryKey: coordinator.dispatchIntent.deliveryKey,
                 runtimeSurface: coordinator.dispatchIntent.runtimeSurface,
+                ...(coordinator.dispatchIntent.recovery !== undefined && coordinator.dispatchIntent.turnSeq !== undefined
+                    ? {
+                          recoveryHint: {
+                              reason: 'lease_expired' as const,
+                              generation: coordinator.dispatchIntent.generation,
+                              deliveryKey: coordinator.dispatchIntent.deliveryKey,
+                              turnSeq: coordinator.dispatchIntent.turnSeq,
+                          },
+                      }
+                    : {}),
             });
         }
         rows.sort((a, b) => a.updatedAt.localeCompare(b.updatedAt) ||

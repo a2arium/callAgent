@@ -30,6 +30,7 @@ export type CreateArtifactFactoryParams = {
         | null
         | undefined;
     onFailure?: (failure: ArtifactFactoryFailure) => void;
+    assertMutationAllowed?: (operation: string) => void;
 };
 
 export function assertArtifactsFactory(
@@ -73,11 +74,14 @@ export function createArtifactFactory(
         value?: T,
         options?: { mimeType?: string; preview?: string }
     ): ArtifactHandle<T> => {
+        params.assertMutationAllowed?.('artifact.create');
         const artifact = new ArtifactImpl<T>(
             undefined,
             getCache(),
             params.tenantId,
-            options?.mimeType
+            options?.mimeType,
+            undefined,
+            params.assertMutationAllowed
         );
         if (value !== undefined) {
             void artifact.set(value).catch((error) => {
@@ -96,17 +100,21 @@ export function createArtifactFactory(
         text: (value?: string) => create(value, { mimeType: 'text/plain' }),
         json: <T>(value?: T) => create(value, { mimeType: 'application/json' }),
         retain: async (artifact, ownerId) => {
+            params.assertMutationAllowed?.('artifact.retain');
             await artifact.load();
+            params.assertMutationAllowed?.('artifact.retain');
             if (!artifact.id) throw new Error('Artifact has no ID after storage completed');
             const cache = await getCache();
             await cache.retainArtifact(params.tenantId, artifact.id, ownerId);
         },
         retainMany: async (artifactHandles, ownerId) => {
+            params.assertMutationAllowed?.('artifact.retain_many');
             // Keep verification/storage completion bounded. Recovered artifact
             // graphs can contain thousands of multi-megabyte handles; loading
             // all of them concurrently would defeat bulk retention's memory
             // safety even though the database write itself is batched.
             for (const artifact of artifactHandles) await artifact.load();
+            params.assertMutationAllowed?.('artifact.retain_many');
             const artifactIds = artifactHandles.map((artifact) => {
                 if (!artifact.id) throw new Error('Artifact has no ID after storage completed');
                 return artifact.id;
@@ -115,22 +123,27 @@ export function createArtifactFactory(
             await cache.retainArtifacts(params.tenantId, artifactIds, ownerId);
         },
         retainIds: async (artifactIds, ownerId) => {
+            params.assertMutationAllowed?.('artifact.retain_ids');
             const cache = await getCache();
             await cache.retainArtifacts(params.tenantId, artifactIds, ownerId);
         },
         inheritOwner: async (fromOwnerId, toOwnerId, excludedArtifactIds) => {
+            params.assertMutationAllowed?.('artifact.inherit_owner');
             const cache = await getCache();
             return cache.inheritArtifactOwner(params.tenantId, fromOwnerId, toOwnerId, excludedArtifactIds);
         },
         release: async (artifactId, ownerId) => {
+            params.assertMutationAllowed?.('artifact.release');
             const cache = await getCache();
             await cache.releaseArtifact(params.tenantId, artifactId, ownerId);
         },
         releaseOwner: async (ownerId) => {
+            params.assertMutationAllowed?.('artifact.release_owner');
             const cache = await getCache();
             return cache.releaseArtifactOwner(params.tenantId, ownerId);
         },
         delete: async (artifactId) => {
+            params.assertMutationAllowed?.('artifact.delete');
             const cache = await getCache();
             return cache.deleteArtifact(params.tenantId, artifactId);
         },

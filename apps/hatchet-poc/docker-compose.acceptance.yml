@@ -20,6 +20,9 @@ services:
     ports: !override
       - "17077:7070"
 
-  hatchet-dashboard:
+  hatchet-api:
+    environment:
+      SERVER_URL: http://localhost:18080
+      SERVER_GRPC_BROADCAST_ADDRESS: localhost:17077
     ports: !override
-      - "18080:80"
+      - "18080:8080"

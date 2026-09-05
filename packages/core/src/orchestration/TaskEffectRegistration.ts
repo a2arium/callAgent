@@ -105,6 +105,7 @@ export async function registerTaskEffect<T>(params: {
 }): Promise<TaskEffectRegistrationResult<T>> {
     await reconcileTerminalAncestor(params);
     const activeTurnClaim = currentTaskTurnClaim();
+    throwIfTurnExecutionAborted(activeTurnClaim?.abortSignal);
     const result = await reconcileSnapshotMutation<RegistrationDecision<T>>({
         session: params.session,
         tenantId: params.tenantId,
@@ -112,6 +113,7 @@ export async function registerTaskEffect<T>(params: {
         agentId: params.agentId,
         operation: params.operation,
         mutate: ({ snapshot, storageNow }) => {
+            throwIfTurnExecutionAborted(activeTurnClaim?.abortSignal);
             if (activeTurnClaim !== undefined) {
                 assertCurrentTaskTurn(snapshot, {
                     tenantId: params.tenantId,
@@ -155,6 +157,14 @@ export async function registerTaskEffect<T>(params: {
         lifecycle: result.value.lifecycle,
         snapshot: result.snapshot,
     };
+}
+
+function throwIfTurnExecutionAborted(signal: AbortSignal | undefined): void {
+    if (!signal?.aborted) return;
+    if (signal.reason instanceof Error) throw signal.reason;
+    throw Object.assign(new Error('Task turn execution no longer permits effect registration'), {
+        code: 'TASK_TURN_OWNERSHIP_LOST',
+    });
 }
 
 /** Revalidate the owner lifecycle and an optional durable pending token. */

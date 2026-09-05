@@ -15,7 +15,11 @@ export class EpisodicMemoryRegistry implements MemoryRegistry<EpisodicMemoryBack
      * @param backends Map of backend names to implementations
      * @param defaultBackend Name of the default backend
      */
-    constructor(backends: Record<string, EpisodicMemoryBackend>, defaultBackend: string) {
+    constructor(
+        backends: Record<string, EpisodicMemoryBackend>,
+        defaultBackend: string,
+        private mutationGuard?: (operation: string) => void
+    ) {
         this.backends = backends;
         this.defaultBackend = defaultBackend;
     }
@@ -43,6 +47,7 @@ export class EpisodicMemoryRegistry implements MemoryRegistry<EpisodicMemoryBack
      * @param opts Optional backend override and tags
      */
     async append<T>(event: T, opts?: { backend?: string, tags?: string[] }): Promise<void> {
+        this.mutationGuard?.('episodic.append');
         const backend = this.backends[opts?.backend ?? this.defaultBackend];
         return backend.append<T>(event, opts);
     }
@@ -63,7 +68,8 @@ export class EpisodicMemoryRegistry implements MemoryRegistry<EpisodicMemoryBack
      * @param opts Optional backend override
      */
     async deleteEvent(id: string, opts?: { backend?: string }): Promise<void> {
+        this.mutationGuard?.('episodic.delete');
         const backend = this.backends[opts?.backend ?? this.defaultBackend];
         return backend.deleteEvent(id, opts);
     }
-} 
+}

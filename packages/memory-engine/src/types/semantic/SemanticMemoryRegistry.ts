@@ -134,7 +134,8 @@ export class SemanticMemoryRegistry implements Omit<MemoryRegistry<SemanticMemor
         backends: Record<string, SemanticMemoryBackend>,
         defaultBackend: string,
         private eventSink?: (event: SemanticMemoryEvent) => Promise<void> | void,
-        private taskContext?: unknown
+        private taskContext?: unknown,
+        private mutationGuard?: (operation: string) => void
     ) {
         this.backends = backends;
         this.defaultBackend = defaultBackend;
@@ -257,6 +258,7 @@ export class SemanticMemoryRegistry implements Omit<MemoryRegistry<SemanticMemor
                 return result;
             },
             compareAndSet: async <T>(input: SemanticCompareAndSetInput<T>, options?: SemanticCompareAndSetOptions) => {
+                this.mutationGuard?.('semantic.compare_and_set');
                 const normalizedOptions = options?.tags === undefined
                     ? options
                     : { ...options, tags: normalizeStoredTags(options.tags) };
@@ -289,6 +291,7 @@ export class SemanticMemoryRegistry implements Omit<MemoryRegistry<SemanticMemor
      * @param opts Optional backend override and tags
      */
     async set<T>(key: string, value: T, opts?: MemorySetOptions): Promise<void> {
+        this.mutationGuard?.('semantic.set');
         const { backendName, backend } = this.resolveBackend(opts?.backend);
         const normalizedOptions = opts?.tags === undefined
             ? opts
@@ -537,6 +540,7 @@ export class SemanticMemoryRegistry implements Omit<MemoryRegistry<SemanticMemor
     }
 
     async removeItems(filter: SemanticRemoveFilter): Promise<SemanticRemoveResult> {
+        this.mutationGuard?.('semantic.remove_items');
         if (filter.orderBy && !['createdAt', 'updatedAt'].includes(filter.orderBy.path)) {
             throw new SemanticQueryError('SEMANTIC_QUERY_INVALID_COMBINATION', 'Semantic-memory removal order path is unsupported');
         }
@@ -616,6 +620,7 @@ export class SemanticMemoryRegistry implements Omit<MemoryRegistry<SemanticMemor
         idOrFilter: string | SemanticRemoveFilter | SemanticPredicateFilter,
         options?: { backend?: string }
     ): Promise<void> {
+        this.mutationGuard?.('semantic.remove_item');
         if (typeof idOrFilter === 'string') {
             await this.delete(idOrFilter, options);
             return;
@@ -689,6 +694,7 @@ export class SemanticMemoryRegistry implements Omit<MemoryRegistry<SemanticMemor
      * @param opts Optional backend override
      */
     async delete(key: string, opts?: { backend?: string }): Promise<void> {
+        this.mutationGuard?.('semantic.delete');
         const { backendName, backend } = this.resolveBackend(opts?.backend);
         const deleteItem = this.requireMethod(backendName, backend, 'delete');
         await deleteItem(key, opts);
@@ -710,6 +716,7 @@ export class SemanticMemoryRegistry implements Omit<MemoryRegistry<SemanticMemor
      * @returns Number of entries removed
      */
     async remove(input: GetManyInput, options?: GetManyOptions): Promise<number> {
+        this.mutationGuard?.('semantic.remove');
         const { backendName, backend } = this.resolveBackend(options?.backend);
         const remove = this.requireMethod(backendName, backend, 'remove');
         const removed = await remove(input, options);
@@ -748,6 +755,7 @@ export class SemanticMemoryRegistry implements Omit<MemoryRegistry<SemanticMemor
      * @param options Enrichment options
      */
     async enrich<T>(key: string, additionalData: T[], options?: EnrichmentOptions): Promise<EnrichmentResult<T>> {
+        this.mutationGuard?.('semantic.enrich');
         const optionsWithBackend = options as EnrichmentOptions & { backend?: string };
         const backendName = optionsWithBackend.backend ?? this.defaultBackend;
         const { backend: resolvedBackend } = this.resolveBackend(backendName);

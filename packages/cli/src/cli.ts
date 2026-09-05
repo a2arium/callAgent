@@ -217,13 +217,19 @@ async function dev(options: Options, sourceRoot?: string): Promise<void> {
     }
     const expectedAgents = descriptor.workspaces.flatMap((workspace) => workspace.agents.map((agent) => agent.id)).sort();
     const children = new Map<string, ChildProcess>();
+    const workerShutdownGraceMs = parseWorkerShutdownGraceMs(
+        (childEnv as NodeJS.ProcessEnv).CALLAGENT_WORKER_SHUTDOWN_GRACE_MS
+    );
     let stopped = false;
     const stop = async (reason: string, code = 0): Promise<void> => {
         if (!stopped) {
             stopped = true;
             console.log(`Stopping runtime (${reason})...`);
             for (const child of children.values()) child.kill('SIGTERM');
-            await Promise.race([Promise.allSettled(Array.from(children.values()).map(waitForExit)), timeout(5_000)]);
+            await Promise.race([
+                Promise.allSettled(Array.from(children.values()).map(waitForExit)),
+                timeout(workerShutdownGraceMs + 5_000),
+            ]);
             for (const child of children.values()) if (child.exitCode === null) child.kill('SIGKILL');
             await descriptorFile.cleanup();
         }
@@ -250,6 +256,15 @@ async function dev(options: Options, sourceRoot?: string): Promise<void> {
     } catch (error) {
         await stop(error instanceof Error ? error.message : String(error), 1);
     }
+}
+
+function parseWorkerShutdownGraceMs(raw: string | undefined): number {
+    if (raw === undefined || raw.length === 0) return 30_000;
+    const value = Number(raw);
+    if (!Number.isSafeInteger(value) || value <= 0) {
+        throw new Error('CALLAGENT_WORKER_SHUTDOWN_GRACE_MS must be a positive integer');
+    }
+    return value;
 }
 
 export function printStartupSummary(options: {

@@ -73,21 +73,56 @@ it('corrects only a timeout cancellation that happened after the provider failur
     });
 });
 
-it('records a failed Hatchet provider status before reconciling terminal rows', async () => {
+it('records only a stable failed Hatchet provider status before reconciling terminal rows', async () => {
     const findMany = jest.fn()
+        .mockResolvedValueOnce([{ id: 'row-a', providerRunId: 'provider-a' }])
+        .mockResolvedValueOnce([])
         .mockResolvedValueOnce([{ id: 'row-a', providerRunId: 'provider-a' }])
         .mockResolvedValueOnce([]);
     const updateMany = jest.fn(async () => ({ count: 1 }));
+    let now = new Date('2026-09-05T00:00:00.000Z');
     const reconciler = new ProviderTerminalReconciler(
         { driverRun: { findMany, updateMany } },
         {} as any,
         { runs: { get_status: jest.fn(async () => 'FAILED') } } as any,
+        () => now,
+        15_000,
     );
 
+    await reconciler.scanOnce();
+    expect(updateMany).not.toHaveBeenCalled();
+
+    now = new Date('2026-09-05T00:00:15.000Z');
     await reconciler.scanOnce();
 
     expect(updateMany).toHaveBeenCalledWith(expect.objectContaining({
         where: { id: 'row-a', status: { in: ['queued', 'running'] } },
         data: expect.objectContaining({ status: 'failed' }),
     }));
+});
+
+it('forgets a provisional provider failure when the run recovers', async () => {
+    const findMany = jest.fn()
+        .mockResolvedValueOnce([{ id: 'row-a', providerRunId: 'provider-a' }]).mockResolvedValueOnce([])
+        .mockResolvedValueOnce([{ id: 'row-a', providerRunId: 'provider-a' }]).mockResolvedValueOnce([])
+        .mockResolvedValueOnce([{ id: 'row-a', providerRunId: 'provider-a' }]).mockResolvedValueOnce([]);
+    const updateMany = jest.fn(async () => ({ count: 1 }));
+    const getStatus = jest.fn()
+        .mockResolvedValueOnce('FAILED')
+        .mockResolvedValueOnce('RUNNING')
+        .mockResolvedValueOnce('FAILED');
+    let nowMs = 0;
+    const reconciler = new ProviderTerminalReconciler(
+        { driverRun: { findMany, updateMany } }, {} as any,
+        { runs: { get_status: getStatus } } as any,
+        () => new Date(nowMs), 15_000,
+    );
+
+    await reconciler.scanOnce();
+    nowMs = 15_000;
+    await reconciler.scanOnce();
+    nowMs = 30_000;
+    await reconciler.scanOnce();
+
+    expect(updateMany).not.toHaveBeenCalled();
 });

@@ -545,7 +545,13 @@ describe('TaskTurnCoordinator', () => {
             session, tenantId: 'tenant-a', taskId: 'task-a', ownerId: 'worker-c',
             requestKey: 'task-a:wake:3', runtimeSurface: 'hatchet', leaseMs: 1_000,
         });
-        expect(laterWake.result.disposition).toBe('queued');
+        expect(laterWake.result).toMatchObject({
+            disposition: 'queued',
+            recoveryHint: {
+                reason: 'lease_expired', generation: '1',
+                deliveryKey: 'task-a:turn-request:1', turnSeq: first.result.claim.turnSeq,
+            },
+        });
         state = readTaskTurnCoordinator((await session.load('tenant-a', 'task-a'))?.snapshot);
         expect(state.requestedGeneration).toBe('3');
         expect(state.dispatchIntent?.generation).toBe('1');

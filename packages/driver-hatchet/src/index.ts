@@ -35,9 +35,16 @@ export {
 } from './startHatchetOutboxWorkerApp.js';
 export {
     startHatchetRuntimeWorkerApp,
+    resolveWorkerShutdownGraceMs,
+    DEFAULT_WORKER_SHUTDOWN_GRACE_MS,
     type HatchetRuntimeWorkerApp,
     type StartHatchetRuntimeWorkerAppOptions,
 } from './startHatchetRuntimeWorkerApp.js';
+export {
+    HatchetExecutionSupervisor,
+    HatchetWorkerStreamUnavailableError,
+    type HatchetExecutionDrainResult,
+} from './hatchetExecutionSupervisor.js';
 export {
     ProviderTerminalReconciler,
     convergeProviderTerminal,

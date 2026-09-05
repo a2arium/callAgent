@@ -81,6 +81,8 @@ export type UnifiedMemoryServiceConfig = {
     embedAdapter?: EmbedMemoryAdapter;
     /** Agent ID for this service instance */
     agentId?: string;
+    /** Rejects task-scoped mutations after execution ownership is lost. */
+    mutationGuard?: (operation: string) => void;
 };
 
 /**
@@ -106,6 +108,7 @@ export class UnifiedMemoryService {
     private episodicMemoryAdapter?: EpisodicMemoryAdapter;
     private embedMemoryAdapter?: EmbedMemoryAdapter;
     private defaultAgentId: string;
+    private mutationGuard?: (operation: string) => void;
 
     private cloneQueryOptions(options?: GetManyOptions): GetManyOptions | undefined {
         if (!options) return undefined;
@@ -200,6 +203,7 @@ export class UnifiedMemoryService {
         this.semanticMemoryAdapter = config.semanticAdapter;
         this.episodicMemoryAdapter = config.episodicAdapter;
         this.embedMemoryAdapter = config.embedAdapter;
+        this.mutationGuard = config.mutationGuard;
 
         this.logger.info('UnifiedMemoryService initialized', {
             tenantId: this.tenantId,
@@ -212,6 +216,10 @@ export class UnifiedMemoryService {
         });
     }
 
+    private assertMutationAllowed(operation: string): void {
+        this.mutationGuard?.(operation);
+    }
+
     // ========================================
     // Working Memory Operations
     // ========================================
@@ -220,6 +228,7 @@ export class UnifiedMemoryService {
      * Set working memory value (generic method for MLO backend)
      */
     async setWorkingMemory(key: string, value: unknown, type: string, tenantId?: string): Promise<void> {
+        this.assertMutationAllowed('working.set');
         const effectiveTenantId = tenantId || this.tenantId;
 
         // Route to appropriate working memory method based on type
@@ -298,6 +307,7 @@ export class UnifiedMemoryService {
      * Delete working memory value (generic method for MLO backend)
      */
     async deleteWorkingMemory(key: string, tenantId?: string): Promise<void> {
+        this.assertMutationAllowed('working.delete');
         const effectiveTenantId = tenantId || this.tenantId;
 
         // Working memory deletion is typically handled by clearing sessions
@@ -309,6 +319,7 @@ export class UnifiedMemoryService {
      * Set the current goal for an agent
      */
     async setGoal(goal: string, agentId?: string): Promise<void> {
+        this.assertMutationAllowed('goals.set');
         const effectiveAgentId = agentId || this.defaultAgentId;
 
         this.logger.debug('Setting goal', {
@@ -342,6 +353,7 @@ export class UnifiedMemoryService {
 
             // Store the processed goal in the working memory adapter
             if (this.workingMemoryAdapter) {
+                this.assertMutationAllowed('goals.set');
                 try {
                     await this.workingMemoryAdapter.setGoal(goalText, effectiveAgentId, this.tenantId);
                     this.logger.debug('Goal stored in adapter successfully', {
@@ -400,6 +412,7 @@ export class UnifiedMemoryService {
      * Add a thought to working memory
      */
     async addThought(thought: string, agentId?: string): Promise<void> {
+        this.assertMutationAllowed('thoughts.add');
         const effectiveAgentId = agentId || this.defaultAgentId;
 
         this.logger.debug('Adding thought', {
@@ -434,6 +447,7 @@ export class UnifiedMemoryService {
 
             // Store the processed thought in the working memory adapter
             if (this.workingMemoryAdapter) {
+                this.assertMutationAllowed('thoughts.add');
                 try {
                     const thoughtEntry: ThoughtEntry = {
                         timestamp: new Date().toISOString(),
@@ -498,6 +512,7 @@ export class UnifiedMemoryService {
      * Make a decision and store it in working memory
      */
     async makeDecision(key: string, decision: string, reasoning?: string, agentId?: string): Promise<void> {
+        this.assertMutationAllowed('decisions.add');
         const effectiveAgentId = agentId || this.defaultAgentId;
 
         this.logger.debug('Making decision', {
@@ -550,6 +565,7 @@ export class UnifiedMemoryService {
 
             // Store the processed decision in the working memory adapter
             if (this.workingMemoryAdapter) {
+                this.assertMutationAllowed('decisions.add');
                 try {
                     const decisionEntry: DecisionEntry = {
                         decision: extractedDecision,
@@ -643,6 +659,7 @@ export class UnifiedMemoryService {
      * Set a working memory variable
      */
     async setWorkingVariable(key: string, value: unknown, agentId?: string): Promise<void> {
+        this.assertMutationAllowed('working_variable.set');
         const effectiveAgentId = agentId || this.defaultAgentId;
 
         this.logger.debug('Setting working variable', {
@@ -690,6 +707,7 @@ export class UnifiedMemoryService {
 
             // Store the processed variable in the working memory adapter
             if (this.workingMemoryAdapter) {
+                this.assertMutationAllowed('working_variable.set');
                 try {
                     await this.workingMemoryAdapter.setVariable(extractedKey, extractedValue, effectiveAgentId, this.tenantId);
                     this.logger.debug('Variable stored in adapter successfully', {
@@ -753,6 +771,7 @@ export class UnifiedMemoryService {
      * Set semantic memory (backward compatible with existing adapters)
      */
     async setSemanticMemory(key: string, value: unknown, namespace?: string): Promise<void> {
+        this.assertMutationAllowed('semantic.set');
         this.logger.debug('Setting semantic memory', {
             key,
             namespace,
@@ -801,6 +820,7 @@ export class UnifiedMemoryService {
 
             // Use existing adapter if available
             if (this.semanticMemoryAdapter) {
+                this.assertMutationAllowed('semantic.set');
                 await this.semanticMemoryAdapter.set(
                     extractedKey,
                     extractedValue,
@@ -884,6 +904,7 @@ export class UnifiedMemoryService {
      * Delete semantic memory entry with MLO processing
      */
     async deleteSemanticMemory(key: string, namespace?: string): Promise<void> {
+        this.assertMutationAllowed('semantic.delete');
         this.logger.debug('Deleting semantic memory', {
             key,
             namespace,
@@ -915,6 +936,7 @@ export class UnifiedMemoryService {
             }
 
             if (this.semanticMemoryAdapter?.delete) {
+                this.assertMutationAllowed('semantic.delete');
                 await this.semanticMemoryAdapter.delete(extractedKey, extractedNamespace, this.tenantId);
 
                 this.logger.debug('Semantic memory deleted via adapter', {
@@ -937,6 +959,7 @@ export class UnifiedMemoryService {
  * Delete multiple semantic memory entries with MLO processing
  */
     async deleteManySemanticMemory(input: GetManyInput, options?: GetManyOptions): Promise<number> {
+        this.assertMutationAllowed('semantic.delete_many');
         this.logger.debug('Deleting many semantic memory entries', {
             input: typeof input === 'string' ? input : 'query object',
             hasOptions: !!options,
@@ -971,6 +994,7 @@ export class UnifiedMemoryService {
                 throw new Error(`Failed to process semantic memory removal: ${result.metadata?.error || 'Unknown error'}`);
             }
 
+            this.assertMutationAllowed('semantic.delete_many');
             const deletedCount = await this.semanticMemoryAdapter.remove(prepared.input, prepared.options, this.tenantId);
 
             this.logger.debug(`Bulk deleted ${deletedCount} entries via adapter`);
@@ -993,6 +1017,7 @@ export class UnifiedMemoryService {
         // Process each deletion through MLO pipeline
         let deletedCount = 0;
         for (const entry of entriesToDelete) {
+            this.assertMutationAllowed('semantic.delete_many');
             try {
                 const item = createMemoryItem(
                     { key: entry.key },
@@ -1015,6 +1040,7 @@ export class UnifiedMemoryService {
                     }
 
                     if (this.semanticMemoryAdapter?.delete) {
+                        this.assertMutationAllowed('semantic.delete_many');
                         await this.semanticMemoryAdapter.delete(extractedKey, undefined, this.tenantId);
                         deletedCount++;
 
@@ -1051,6 +1077,7 @@ export class UnifiedMemoryService {
      * Append an event to episodic memory
      */
     async appendEpisodic(event: unknown): Promise<void> {
+        this.assertMutationAllowed('episodic.append');
         this.logger.debug('Appending episodic event', {
             eventType: typeof event,
             tenantId: this.tenantId
@@ -1068,6 +1095,7 @@ export class UnifiedMemoryService {
             const processedEvent = result.processedItems[0].data;
 
             if (this.episodicMemoryAdapter) {
+                this.assertMutationAllowed('episodic.append');
                 await this.episodicMemoryAdapter.append(processedEvent, {}, this.tenantId);
 
                 this.logger.debug('Episodic event appended via adapter');
@@ -1116,6 +1144,7 @@ export class UnifiedMemoryService {
      * Delete episodic event with MLO processing
      */
     async deleteEpisodicEvent(id: string): Promise<void> {
+        this.assertMutationAllowed('episodic.delete');
         this.logger.debug('Deleting episodic event', {
             id,
             tenantId: this.tenantId
@@ -1142,6 +1171,7 @@ export class UnifiedMemoryService {
             }
 
             if (this.episodicMemoryAdapter?.deleteEvent) {
+                this.assertMutationAllowed('episodic.delete');
                 await this.episodicMemoryAdapter.deleteEvent(extractedId, this.tenantId);
 
                 this.logger.debug('Episodic event deleted via adapter', {
@@ -1167,6 +1197,7 @@ export class UnifiedMemoryService {
      * Upsert embed memory with MLO processing
      */
     async upsertEmbedMemory<T>(key: string, embedding: number[], value: T): Promise<void> {
+        this.assertMutationAllowed('embed.upsert');
         this.logger.debug('Upserting embed memory', {
             key,
             embeddingLength: embedding.length,
@@ -1202,6 +1233,7 @@ export class UnifiedMemoryService {
             }
 
             if (this.embedMemoryAdapter) {
+                this.assertMutationAllowed('embed.upsert');
                 await this.embedMemoryAdapter.upsert(extractedKey, extractedEmbedding, extractedValue, this.tenantId);
 
                 this.logger.debug('Embed memory upserted via adapter', {
@@ -1254,6 +1286,7 @@ export class UnifiedMemoryService {
      * Delete embed memory entry with MLO processing
      */
     async deleteEmbedMemory(key: string): Promise<void> {
+        this.assertMutationAllowed('embed.delete');
         this.logger.debug('Deleting embed memory', {
             key,
             tenantId: this.tenantId
@@ -1280,6 +1313,7 @@ export class UnifiedMemoryService {
             }
 
             if (this.embedMemoryAdapter) {
+                this.assertMutationAllowed('embed.delete');
                 await this.embedMemoryAdapter.delete(extractedKey, this.tenantId);
 
                 this.logger.debug('Embed memory deleted via adapter', {
@@ -1367,6 +1401,7 @@ export class UnifiedMemoryService {
      * Unified remember operation across all memory types
      */
     async remember(key: string, value: unknown, options?: RememberOptions): Promise<void> {
+        this.assertMutationAllowed('memory.remember');
         this.logger.debug('Unified remember operation', {
             key,
             valueType: typeof value,
@@ -1461,6 +1496,7 @@ export class UnifiedMemoryService {
                 if (!this.semanticMemoryAdapter) {
                     throw new Error('No semantic memory adapter configured');
                 }
+                this.assertMutationAllowed('memory.remember');
                 await this.semanticMemoryAdapter.set(
                     extractedKey,
                     extractedValue,
@@ -1476,6 +1512,7 @@ export class UnifiedMemoryService {
                 if (!this.episodicMemoryAdapter) {
                     throw new Error('No episodic memory adapter configured');
                 }
+                this.assertMutationAllowed('memory.remember');
                 await this.episodicMemoryAdapter.append(
                     { key: extractedKey, value: extractedValue },
                     {},

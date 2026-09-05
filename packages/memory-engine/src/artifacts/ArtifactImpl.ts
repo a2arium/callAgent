@@ -16,7 +16,8 @@ export class ArtifactImpl<T = unknown> implements ArtifactHandle<T> {
         private cache: AgentResultCache | Promise<AgentResultCache>,
         private tenantId: string,
         public mimeType?: string,
-        public estimatedSize?: number
+        public estimatedSize?: number,
+        private mutationGuard?: (operation: string) => void
     ) { }
 
     private async getCache(): Promise<AgentResultCache> {
@@ -27,12 +28,14 @@ export class ArtifactImpl<T = unknown> implements ArtifactHandle<T> {
     }
 
     async set(value: T): Promise<void> {
+        this.mutationGuard?.('artifact.set');
         if (!this.id) {
             this.id = uuidv4();
         }
 
         this._pendingWrite = (async () => {
             const cache = await this.getCache();
+            this.mutationGuard?.('artifact.set');
             const stored = await cache.storeArtifact(
                 this.tenantId,
                 this.id,

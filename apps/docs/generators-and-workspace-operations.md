@@ -80,6 +80,12 @@ worker's fresh Hatchet health lease; `/health` remains available for the
 deployment supervisor. Set worker readiness to `disabled` only when this host
 is deliberately API-only and another installation owns its workers.
 
+`CALLAGENT_WORKER_SHUTDOWN_GRACE_MS` defaults to 30 seconds. On worker-stream
+loss the workspace stops reconciliation, aborts active CallAgent segments,
+drains within that limit, and exits the worker process non-zero. The deployment
+supervisor must replace it. Upgrade core, Hatchet driver, runtime, and CLI as a
+coordinated set when the internal durable protocol changes.
+
 Postgres is intentionally not started by `infra:up`: it is a workspace-owned
 external dependency configured through `MEMORY_DATABASE_URL`. The workspace
 database commands always use that same `.env` value.

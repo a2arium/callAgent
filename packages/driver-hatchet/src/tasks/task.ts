@@ -253,8 +253,9 @@ async function executeTaskTaskInner(
     const protocolNames = deps?.protocolNames ?? DEFAULT_TASK_PROTOCOL_NAMES;
     let wake: SegmentTaskWake = { trigger: 'start', input: input.input };
     let idempotencyKey = input.idempotencyKey;
-    let turnSeq = 0;
+    let attemptOrdinal = 0;
     let recoveryGeneration = input.recoveryGeneration;
+    let queuedFallbackCount = 0;
 
     try {
         const bootstrap = await runTaskState(ctx, input, deps, {
@@ -277,7 +278,7 @@ async function executeTaskTaskInner(
             );
             wake = boundaryEventToWake(persistedBoundary.boundary, hydratedEvent);
             idempotencyKey = hydratedEvent.idempotencyKey ?? `${input.taskId}:${hydratedEvent.kind}:${hydratedEvent.token}`;
-            turnSeq = persistedBoundary.turnSeq;
+            attemptOrdinal = persistedBoundary.turnSeq;
         }
 
         if (persistedBoundary === undefined) {
@@ -296,14 +297,14 @@ async function executeTaskTaskInner(
         }
 
         for (;;) {
-            turnSeq += 1;
+            attemptOrdinal += 1;
             const segmentInput: SegmentTaskInput = {
                 tenantId: input.tenantId,
                 taskId: input.taskId,
                 agentId: input.agentId,
                 wake,
                 idempotencyKey,
-                attemptSeq: turnSeq,
+                attemptSeq: attemptOrdinal,
                 rootTaskId: input.rootTaskId ?? input.taskId,
                 ...(input.parentTaskId !== undefined ? { parentTaskId: input.parentTaskId } : {}),
                 ...(input.rootRunKey !== undefined ? { rootRunKey: input.rootRunKey } : {}),
@@ -315,7 +316,7 @@ async function executeTaskTaskInner(
                 protocolNames.segment,
                 segmentInput,
                 {
-                    key: `${input.rootRunKey ?? input.taskId}:segment:${turnSeq}:${idempotencyKey}`,
+                    key: `${input.rootRunKey ?? input.taskId}:segment:${attemptOrdinal}:${idempotencyKey}`,
                     additionalMetadata: buildTaskRunMetadata(input, segmentInput),
                 }
             );
@@ -323,7 +324,24 @@ async function executeTaskTaskInner(
             await dispatchPendingOutboxChildren(ctx, input, segment, deps);
 
             if (segment.turnDisposition === 'queued') {
-                await waitForTurnAvailability(ctx, input, turnSeq);
+                if (segment.recoveryHint !== undefined) {
+                    const hint = validateRecoveryHint(input, segment.recoveryHint);
+                    defaultMetricsRegistry.increment('hatchet_root_recovery_hint_total', { source: 'segment' });
+                    recoveryGeneration = hint.generation;
+                    idempotencyKey = hint.deliveryKey;
+                    queuedFallbackCount = 0;
+                    continue;
+                }
+                const eventHint = await waitForTurnAvailability(
+                    ctx, input, attemptOrdinal, segment.turnAvailableAt, queuedFallbackCount
+                );
+                queuedFallbackCount += 1;
+                if (eventHint !== undefined) {
+                    defaultMetricsRegistry.increment('hatchet_root_recovery_hint_total', { source: 'event' });
+                    recoveryGeneration = eventHint.generation;
+                    idempotencyKey = eventHint.deliveryKey;
+                    queuedFallbackCount = 0;
+                }
                 continue;
             }
             if (segment.turnDisposition === 'lease_expired_recovery_staged') {
@@ -332,22 +350,24 @@ async function executeTaskTaskInner(
                 }
                 recoveryGeneration = segment.claimedGeneration;
                 idempotencyKey = `${input.taskId}:turn-request:${segment.claimedGeneration}`;
-                await waitForTurnAvailability(ctx, input, turnSeq);
+                queuedFallbackCount = 0;
                 continue;
             }
             recoveryGeneration = undefined;
+            queuedFallbackCount = 0;
 
             let boundary = segment.boundary;
             if (deps?.useTaskStateChildren === true && segment.turnDisposition !== 'executed') {
                 const authoritative = await runTaskState(ctx, input, deps, {
                     operation: 'reload_authoritative', task: input,
-                }, `authoritative:${turnSeq}:${segment.turnDisposition ?? 'unknown'}`);
+                }, `authoritative:${attemptOrdinal}:${segment.turnDisposition ?? 'unknown'}`);
                 if (authoritative?.authoritativeBoundary === undefined) {
                     defaultMetricsRegistry.increment('hatchet_root_transition_total', {
                         disposition: segment.turnDisposition ?? 'unknown',
                         status: 'recovering',
                     });
-                    await waitForTurnAvailability(ctx, input, turnSeq);
+                    await waitForTurnAvailability(ctx, input, attemptOrdinal, segment.turnAvailableAt, queuedFallbackCount);
+                    queuedFallbackCount += 1;
                     continue;
                 }
                 boundary = authoritative.authoritativeBoundary;
@@ -359,7 +379,7 @@ async function executeTaskTaskInner(
                     : { ...segment, boundary };
                 if (!await runTaskState(ctx, input, deps, {
                     operation: 'project_terminal', task: input, segment: authoritativeSegment,
-                }, `terminal:${turnSeq}:${idempotencyKey}`)) {
+                }, `terminal:${attemptOrdinal}:${idempotencyKey}`)) {
                     await projectTerminalSegment(input, authoritativeSegment, deps);
                 }
                 return authoritativeSegment;
@@ -374,12 +394,12 @@ async function executeTaskTaskInner(
                 const event =
                     await findPersistedBoundaryEventRecorded(
                         ctx, input, boundary, deps,
-                        `turn:${turnSeq}:${boundary.token}`
+                        `turn:${attemptOrdinal}:${boundary.token}`
                     )
                     ?? await waitForBoundaryEvent(ctx, input, boundary, deps);
                 const hydratedEvent = await hydratePersistedBoundaryEventRecorded(
                     ctx, input, boundary, event, deps,
-                    `turn-hydrate:${turnSeq}:${boundary.token}:${event.idempotencyKey ?? event.kind}`
+                    `turn-hydrate:${attemptOrdinal}:${boundary.token}:${event.idempotencyKey ?? event.kind}`
                 );
                 wake = boundaryEventToWake(boundary, hydratedEvent);
                 idempotencyKey = hydratedEvent.idempotencyKey ?? `${input.taskId}:${hydratedEvent.kind}:${hydratedEvent.token}`;
@@ -555,20 +575,74 @@ function isAwaitableBoundary(boundary: SegmentTaskBoundary): boundary is Awaitab
 async function waitForTurnAvailability(
     ctx: DurableContext<TaskTaskInput>,
     input: TaskTaskInput,
-    attemptOrdinal: number
-): Promise<void> {
+    attemptOrdinal: number,
+    availableAt?: string,
+    fallbackCount = 0
+): Promise<SegmentTaskOutput['recoveryHint'] | undefined> {
     if (typeof ctx.waitFor !== 'function') {
         await ctx.sleepFor('1s', `turn-owner:${attemptOrdinal}`);
-        return;
+        return undefined;
     }
     const tenantTaskKey = input.tenantTaskKey ?? encodeTenantTaskKey(input.tenantId, input.taskId);
-    await ctx.waitFor(
-        Or(
-            new UserEventCondition(`task-turn-available:${tenantTaskKey}`, '', 'available'),
-            new SleepCondition('5s', 'recovery')
-        ),
-        `turn-owner:${attemptOrdinal}`
-    );
+    const now = await ctx.now();
+    const availableAtMs = availableAt === undefined ? undefined : Date.parse(availableAt);
+    const availableDelaySeconds = availableAtMs === undefined || !Number.isFinite(availableAtMs)
+        ? undefined
+        : Math.max(1, Math.min(60, Math.ceil((availableAtMs - now.getTime()) / 1_000)));
+    const fallbackDelaySeconds = Math.min(60, 5 * (2 ** Math.min(fallbackCount, 4)));
+    const endWait = defaultMetricsRegistry.startTimer('hatchet_root_turn_owner_wait_ms');
+    try {
+        const result = await ctx.waitFor(
+            Or(
+                new UserEventCondition(`task-turn-available:${tenantTaskKey}`, '', 'available'),
+                new SleepCondition(`${availableDelaySeconds ?? fallbackDelaySeconds}s`, 'retry')
+            ),
+            `turn-owner:${attemptOrdinal}`
+        );
+        const hint = recoveryHintFromWaitResult(input, result);
+        endWait({ status: hint ? 'recovery_event' : 'retry_or_release' });
+        return hint;
+    } catch (error) {
+        endWait({ status: 'failed', errorCode: error instanceof Error ? error.name : 'Error' });
+        throw error;
+    }
+}
+
+function recoveryHintFromWaitResult(
+    input: TaskTaskInput,
+    result: Record<string, unknown>
+): SegmentTaskOutput['recoveryHint'] | undefined {
+    const create = isRecord(result.CREATE) ? result.CREATE : result;
+    const available = create.available;
+    const candidates = Array.isArray(available) ? available : available === undefined ? [] : [available];
+    for (const candidate of candidates) {
+        const envelope = isRecord(candidate) ? candidate : undefined;
+        const data = isRecord(envelope?.data) ? envelope.data : envelope;
+        if (data?.recoveryHint !== undefined) {
+            return validateRecoveryHint(input, data.recoveryHint);
+        }
+    }
+    return undefined;
+}
+
+function validateRecoveryHint(
+    input: TaskTaskInput,
+    value: unknown
+): NonNullable<SegmentTaskOutput['recoveryHint']> {
+    if (!isRecord(value) || value.reason !== 'lease_expired' ||
+        typeof value.generation !== 'string' || !/^(0|[1-9]\d*)$/.test(value.generation) ||
+        typeof value.deliveryKey !== 'string' ||
+        value.deliveryKey !== `${input.taskId}:turn-request:${value.generation}` ||
+        !Number.isSafeInteger(value.turnSeq) || (value.turnSeq as number) <= 0) {
+        defaultMetricsRegistry.increment('hatchet_root_recovery_hint_total', { source: 'invalid' });
+        throw new Error('TASK_TURN_PROTOCOL_STATE_UNKNOWN: invalid recovery hint');
+    }
+    return {
+        reason: 'lease_expired',
+        generation: value.generation,
+        deliveryKey: value.deliveryKey,
+        turnSeq: value.turnSeq as number,
+    };
 }
 
 function encodeTenantTaskKey(tenantId: string, taskId: string): string {

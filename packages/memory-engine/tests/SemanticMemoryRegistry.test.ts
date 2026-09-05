@@ -52,6 +52,31 @@ describe('SemanticMemoryRegistry', () => {
         ]);
     });
 
+    it('rejects mutations after the task guard closes while preserving reads', async () => {
+        const get = jest.fn(async () => ({ visible: true }));
+        const set = jest.fn(async () => undefined);
+        let allowed = true;
+        const registry = new SemanticMemoryRegistry(
+            { sql: backendWith({ get, set }) },
+            'sql',
+            undefined,
+            undefined,
+            () => {
+                if (!allowed) throw Object.assign(new Error('worker unavailable'), {
+                    code: 'HATCHET_WORKER_STREAM_UNAVAILABLE',
+                });
+            }
+        );
+
+        await expect(registry.get('key')).resolves.toEqual({ visible: true });
+        allowed = false;
+        await expect(registry.get('key')).resolves.toEqual({ visible: true });
+        await expect(registry.set('key', 'value')).rejects.toMatchObject({
+            code: 'HATCHET_WORKER_STREAM_UNAVAILABLE',
+        });
+        expect(set).not.toHaveBeenCalled();
+    });
+
     it('returns undefined when the selected backend has no atomic capability', () => {
         const registry = new SemanticMemoryRegistry({ mlo: {} as any }, 'mlo');
         expect(registry.getAtomic()).toBeUndefined();

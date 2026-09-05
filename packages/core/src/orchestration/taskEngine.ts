@@ -5825,6 +5825,14 @@ export class TaskEngine {
             },
             artifacts: createArtifactFactory({
                 tenantId: binding?.tenantId ?? 'default',
+                assertMutationAllowed: (operation) => {
+                    const signal = binding?.abortSignal;
+                    if (!signal?.aborted) return;
+                    if (signal.reason instanceof Error) throw signal.reason;
+                    throw Object.assign(new Error(`Task execution no longer permits ${operation}`), {
+                        code: 'TASK_TURN_OWNERSHIP_LOST',
+                    });
+                },
                 resolveCache: () => {
                     const prisma = this.getSessionStorePrisma();
                     return prisma ? new AgentResultCache(prisma) : undefined;

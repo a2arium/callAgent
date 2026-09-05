@@ -114,10 +114,14 @@ export async function convergeProviderTerminal(
 
 /** Repairs failures that Hatchet recorded after its worker stream became unusable. */
 export class ProviderTerminalReconciler {
+    private readonly firstFailedObservation = new Map<string, number>();
+
     constructor(
         private readonly prisma: any,
         private readonly sessions: SessionManager,
         private readonly hatchet?: HatchetClient,
+        private readonly now: () => Date = () => new Date(),
+        private readonly failureConfirmationMs = 15_000,
     ) {}
 
     async scanOnce(limit = 100): Promise<number> {
@@ -160,15 +164,26 @@ export class ProviderTerminalReconciler {
         for (const row of rows) {
             try {
                 const status = await this.hatchet.runs.get_status(row.providerRunId);
-                if (status !== 'FAILED') continue;
+                if (status !== 'FAILED') {
+                    this.firstFailedObservation.delete(row.providerRunId);
+                    continue;
+                }
+                const observedAt = this.now().getTime();
+                const firstObservedAt = this.firstFailedObservation.get(row.providerRunId);
+                if (firstObservedAt === undefined) {
+                    this.firstFailedObservation.set(row.providerRunId, observedAt);
+                    continue;
+                }
+                if (observedAt - firstObservedAt < this.failureConfirmationMs) continue;
                 await this.prisma.driverRun.updateMany({
                     where: { id: row.id, status: { in: ['queued', 'running'] } },
                     data: {
                         status: 'failed',
                         error: { code: 'HATCHET_PROVIDER_FAILED', message: 'Hatchet reported this provider run as FAILED' },
-                        updatedAt: new Date(),
+                        updatedAt: this.now(),
                     },
                 });
+                this.firstFailedObservation.delete(row.providerRunId);
             } catch (error) {
                 // A status probe is advisory. Its next interval retries without
                 // turning a transient read failure into a task terminal state.

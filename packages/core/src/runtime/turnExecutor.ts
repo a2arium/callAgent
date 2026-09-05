@@ -102,6 +102,10 @@ export type SegmentResult = {
     turnClaim?: { claimId: string; fence: string; claimedGeneration: string; turnSeq: number };
     /** Logical turn this attempt executed, replayed, or was queued behind. */
     associatedTurnSeq?: number;
+    /** Recovery identity discovered while this attempt was queued. */
+    recoveryHint?: import('../orchestration/TaskTurnCoordinator.js').TaskTurnRecoveryHint;
+    /** Earliest authoritative time at which passive takeover may be retried. */
+    turnAvailableAt?: string;
     /** Populated when the segment ran via a prepared turn invocation. */
     taskEntity?: TaskEntity;
     /**

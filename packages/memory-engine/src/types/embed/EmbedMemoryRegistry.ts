@@ -15,7 +15,11 @@ export class EmbedMemoryRegistry implements MemoryRegistry<EmbedMemoryBackend> {
      * @param backends Map of backend names to implementations
      * @param defaultBackend Name of the default backend
      */
-    constructor(backends: Record<string, EmbedMemoryBackend>, defaultBackend: string) {
+    constructor(
+        backends: Record<string, EmbedMemoryBackend>,
+        defaultBackend: string,
+        private mutationGuard?: (operation: string) => void
+    ) {
         this.backends = backends;
         this.defaultBackend = defaultBackend;
     }
@@ -45,6 +49,7 @@ export class EmbedMemoryRegistry implements MemoryRegistry<EmbedMemoryBackend> {
      * @param opts Optional backend override
      */
     async upsert<T>(key: string, embedding: number[], value: T, opts?: { backend?: string }): Promise<void> {
+        this.mutationGuard?.('embed.upsert');
         const backend = this.backends[opts?.backend ?? this.defaultBackend];
         return backend.upsert<T>(key, embedding, value, opts);
     }
@@ -66,7 +71,8 @@ export class EmbedMemoryRegistry implements MemoryRegistry<EmbedMemoryBackend> {
      * @param opts Optional backend override
      */
     async delete(key: string, opts?: { backend?: string }): Promise<void> {
+        this.mutationGuard?.('embed.delete');
         const backend = this.backends[opts?.backend ?? this.defaultBackend];
         return backend.delete(key, opts);
     }
-} 
+}

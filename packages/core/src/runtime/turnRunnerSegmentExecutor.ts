@@ -205,8 +205,11 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
                     admission.result.disposition === 'queued' ? 'queued' :
                         admission.result.disposition === 'terminal' ? 'terminal_replay' : 'matching_replay',
                     admission.result.disposition === 'queued'
-                        ? admission.result.activeClaim?.turnSeq
-                        : undefined
+                        ? admission.result.activeClaim?.turnSeq ?? admission.result.recoveryHint?.turnSeq
+                        : undefined,
+                    undefined,
+                    admission.result.disposition === 'queued' ? admission.result.recoveryHint : undefined,
+                    admission.result.disposition === 'queued' ? admission.result.availableAt : undefined
                 );
             }
             if ((prepared.ctx as { task?: unknown }).task === undefined) {
@@ -362,8 +365,11 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
                 admission.result.disposition === 'queued' ? 'queued' :
                     admission.result.disposition === 'terminal' ? 'terminal_replay' : 'matching_replay',
                 admission.result.disposition === 'queued'
-                    ? admission.result.activeClaim?.turnSeq
-                    : undefined
+                    ? admission.result.activeClaim?.turnSeq ?? admission.result.recoveryHint?.turnSeq
+                    : undefined,
+                undefined,
+                admission.result.disposition === 'queued' ? admission.result.recoveryHint : undefined,
+                admission.result.disposition === 'queued' ? admission.result.availableAt : undefined
             );
         }
 
@@ -937,7 +943,9 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
         agentId?: string,
         turnDisposition: SegmentResult['turnDisposition'] = 'matching_replay',
         associatedTurnSeq?: number,
-        turnClaim?: TaskTurnClaim
+        turnClaim?: TaskTurnClaim,
+        recoveryHint?: SegmentResult['recoveryHint'],
+        turnAvailableAt?: string
     ): Promise<SegmentResult> {
         const snap = await this.sessionManager.load(tenantId, taskId);
         const base = (snap?.snapshot ?? {}) as {
@@ -973,6 +981,8 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
             boundary,
             taskStatus: boundaryToTaskStatus(boundary),
             turnDisposition,
+            ...(recoveryHint !== undefined ? { recoveryHint } : {}),
+            ...(turnAvailableAt !== undefined ? { turnAvailableAt } : {}),
             ...(turnClaim !== undefined ? { turnClaim } : {}),
             ...(associatedTurnSeq !== undefined
                 ? { associatedTurnSeq }

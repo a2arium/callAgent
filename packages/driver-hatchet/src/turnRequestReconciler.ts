@@ -60,6 +60,7 @@ export class TurnRequestReconciler {
                                 taskId: row.sessionId,
                                 generation: row.generation,
                                 deliveryKey: row.deliveryKey,
+                                ...(row.recoveryHint ? { recoveryHint: row.recoveryHint } : {}),
                             },
                             { key: row.deliveryKey }
                         );

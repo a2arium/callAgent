@@ -81,11 +81,24 @@ export type TaskTurnCoordinatorState = {
 
 export type RequestTaskTurnResult =
     | { disposition: 'acquired'; claim: TaskTurnClaim; replacedClaim?: TaskTurnClaim; staged: boolean }
-    | { disposition: 'queued'; activeClaim?: TaskTurnClaim; staged: boolean; availableAt?: string }
+    | {
+          disposition: 'queued';
+          activeClaim?: TaskTurnClaim;
+          staged: boolean;
+          availableAt?: string;
+          recoveryHint?: TaskTurnRecoveryHint;
+      }
     | { disposition: 'matching_replay'; staged: false }
     | { disposition: 'terminal'; staged: false };
 
 export type TaskTurnCompletionDisposition = 'committed' | 'terminal' | 'superseded';
+
+export type TaskTurnRecoveryHint = {
+    reason: 'lease_expired';
+    generation: string;
+    deliveryKey: string;
+    turnSeq: number;
+};
 
 function positiveInteger(value: string | undefined, fallback: number): number {
     if (value === undefined || value.length === 0) return fallback;
@@ -757,7 +770,16 @@ export async function requestTaskTurn(params: {
                 replacedClaim = current.dispatchIntent.recovery.sourceClaim;
             }
             if (params.recoveryGeneration === undefined && current.dispatchIntent?.recovery !== undefined) {
-                const value: RequestTaskTurnResult = { disposition: 'queued', staged: staged.staged };
+                const value: RequestTaskTurnResult = {
+                    disposition: 'queued',
+                    staged: staged.staged,
+                    recoveryHint: {
+                        reason: 'lease_expired',
+                        generation: current.dispatchIntent.generation,
+                        deliveryKey: current.dispatchIntent.deliveryKey,
+                        turnSeq: current.dispatchIntent.turnSeq!,
+                    },
+                };
                 return staged.staged
                     ? { kind: 'write', snapshot: stagedSnapshot, value }
                     : { kind: 'noop', value };
@@ -789,6 +811,7 @@ export async function requestTaskTurn(params: {
                 if (nowMs < expiresAt) {
                     const value: RequestTaskTurnResult = {
                         disposition: 'queued', activeClaim: current.active, staged: staged.staged,
+                        availableAt: new Date(expiresAt + takeoverGraceMs).toISOString(),
                     };
                     return staged.staged ? { kind: 'write', snapshot: stagedSnapshot, value } : { kind: 'noop', value };
                 }

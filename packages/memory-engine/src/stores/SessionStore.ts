@@ -32,6 +32,12 @@ export type RunnableTurnRequest = {
     generation: string;
     deliveryKey: string;
     runtimeSurface: 'direct' | 'in_process' | 'hatchet';
+    recoveryHint?: {
+        reason: 'lease_expired';
+        generation: string;
+        deliveryKey: string;
+        turnSeq: number;
+    };
 };
 
 export type RunnableTurnRequestCursor = {
