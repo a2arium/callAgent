@@ -18,11 +18,23 @@ describe('worker health monitor', () => {
                 name: 'runtime-a', status: 'ACTIVE', lastHeartbeatAt: new Date().toISOString(), registeredWorkflows,
             }] })) } } as any,
             workerName: 'runtime-a',
+            instanceId: 'instance-a',
             intervalMs: 60_000,
         });
 
         expect(upsert).toHaveBeenCalledWith(expect.objectContaining({
-            create: expect.objectContaining({ state: 'ready' }),
+            where: {
+                tenantId_installationId_instanceId: {
+                    tenantId: 'default',
+                    installationId: 'default',
+                    instanceId: 'instance-a',
+                },
+            },
+            create: expect.objectContaining({
+                instanceId: 'instance-a',
+                workerName: 'runtime-a',
+                state: 'ready',
+            }),
         }));
         await monitor.stop();
         expect(upsert).toHaveBeenLastCalledWith(expect.objectContaining({

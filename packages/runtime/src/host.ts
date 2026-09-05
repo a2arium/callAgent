@@ -167,6 +167,7 @@ export async function startRuntimeHost(options: { descriptorPath?: string } = {}
     app.use(express.json({ limit: '1mb' }));
     app.get('/health', (_req, res) => res.json({ ok: true, rpc: '/rpc' }));
     app.get('/ready', async (_req, res) => {
+        let eligibleWorkerInstances: Array<{ instanceId: string; workerName: string; heartbeatAt: Date | null }> = [];
         const databaseCode = databaseMigrationReadinessCode(process.env.CALLAGENT_MIGRATION_MARKER_PATH);
         if (databaseCode) {
             res.status(503).json({ ok: false, code: databaseCode });
@@ -179,22 +180,34 @@ export async function startRuntimeHost(options: { descriptorPath?: string } = {}
         const requiresWorker = process.env.CALLAGENT_HATCHET_WORKER_READINESS !== 'disabled' && process.env.CALLAGENT_OUTBOX_DISPATCHER === 'hatchet';
         if (requiresWorker && sessionStore) {
             const installationId = process.env.CALLAGENT_RUNTIME_INSTALLATION_ID?.trim() || 'default';
-            let healthy: unknown;
             try {
-                healthy = await sessionStore.getPrismaClient().runtimeWorkerHealth.findFirst({
+                eligibleWorkerInstances = await sessionStore.getPrismaClient().runtimeWorkerHealth.findMany({
                     where: { tenantId: process.env.CALLAGENT_OPERATOR_TENANT_ID ?? process.env.CALLAGENT_OPERATOR_BOOTSTRAP_TENANT_ID ?? 'default', installationId, state: 'ready', leaseUntil: { gt: new Date() } },
+                    select: { instanceId: true, workerName: true, heartbeatAt: true },
+                    orderBy: { observedAt: 'desc' },
                 });
             } catch (error) {
                 console.warn('HATCHET_WORKER_HEALTH_READ_FAILED', {
                     message: error instanceof Error ? error.message : String(error),
                 });
             }
-            if (!healthy) {
+            if (eligibleWorkerInstances.length === 0) {
                 res.status(503).json({ ok: false, code: 'HATCHET_WORKER_STREAM_UNAVAILABLE' });
                 return;
             }
         }
-        res.json({ ok: true, workspaceFingerprint: descriptor.fingerprint, agents: descriptor.workspaces.flatMap((workspace) => workspace.agents.map((agent) => agent.id)).sort() });
+        res.json({
+            ok: true,
+            workspaceFingerprint: descriptor.fingerprint,
+            agents: descriptor.workspaces.flatMap((workspace) => workspace.agents.map((agent) => agent.id)).sort(),
+            ...(eligibleWorkerInstances.length > 0 ? {
+                eligibleWorkerInstances: eligibleWorkerInstances.map((worker) => ({
+                    instanceId: worker.instanceId,
+                    workerName: worker.workerName,
+                    ...(worker.heartbeatAt ? { heartbeatAt: worker.heartbeatAt.toISOString() } : {}),
+                })),
+            } : {}),
+        });
     });
     if (operatorAuth) {
         app.use('/operator-api', operatorAuth.managementRouter);

@@ -174,6 +174,8 @@ export async function startOutboxWorker(params: {
         if (params.sessionManager) {
             turnRequestReconciler = new TurnRequestReconciler(params.sessionManager, events, {
                 rootTask: sharedTask,
+                driverRuns,
+                providerStatus: async (providerRunId) => String(await hatchet.runs.get_status(providerRunId)),
             });
             turnRequestReconciler.start();
         }

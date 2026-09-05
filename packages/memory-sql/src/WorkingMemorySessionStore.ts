@@ -40,7 +40,7 @@ export type RunnableTurnRequest = {
     deliveryKey: string;
     runtimeSurface: 'direct' | 'in_process' | 'hatchet';
     recoveryHint?: {
-        reason: 'lease_expired';
+        reason: 'lease_expired' | 'worker_lifetime_lost';
         generation: string;
         deliveryKey: string;
         turnSeq: number;
@@ -431,10 +431,10 @@ export class WorkingMemorySessionStore {
                 return [];
             }
             const recoveryTurnSeq = row.recoveryTurnSeq === null ? undefined : Number(row.recoveryTurnSeq);
-            const recoveryHint = row.recoveryReason === 'lease_expired' &&
+            const recoveryHint = (row.recoveryReason === 'lease_expired' || row.recoveryReason === 'worker_lifetime_lost') &&
                 Number.isSafeInteger(recoveryTurnSeq) && recoveryTurnSeq! > 0
                 ? {
-                      reason: 'lease_expired' as const,
+                      reason: row.recoveryReason as 'lease_expired' | 'worker_lifetime_lost',
                       generation: row.generation,
                       deliveryKey: row.deliveryKey,
                       turnSeq: recoveryTurnSeq!,

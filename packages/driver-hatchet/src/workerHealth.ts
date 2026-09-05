@@ -9,16 +9,18 @@ export async function startWorkerHealthMonitor(params: {
     prisma: any;
     hatchet: HatchetClient;
     workerName: string;
+    instanceId?: string;
     tenantId?: string;
     installationId?: string;
     intervalMs?: number;
     leaseMs?: number;
     initialRegistrationGraceMs?: number;
     onStreamUnavailable?: (error: Error) => void;
+    onHealthy?: (heartbeatAt: Date) => void;
 }): Promise<WorkerHealthMonitor> {
     const tenantId = params.tenantId ?? process.env.CALLAGENT_OPERATOR_TENANT_ID ?? process.env.CALLAGENT_OPERATOR_BOOTSTRAP_TENANT_ID ?? 'default';
     const installationId = params.installationId ?? (process.env.CALLAGENT_RUNTIME_INSTALLATION_ID?.trim() || 'default');
-    const instanceId = randomUUID();
+    const instanceId = params.instanceId ?? randomUUID();
     const workflowHash = createHash('sha256').update(requiredWorkflows.join('\n')).digest('hex');
     const leaseMs = params.leaseMs ?? 30_000;
     const startedAt = Date.now();
@@ -78,6 +80,7 @@ export async function startWorkerHealthMonitor(params: {
             }
             readyOnce = true;
             await persist('ready', undefined, heartbeatAt);
+            params.onHealthy?.(heartbeatAt);
         } catch (error) {
             await unavailable(error instanceof Error ? error : new Error(String(error)));
         }

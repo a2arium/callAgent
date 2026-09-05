@@ -11,6 +11,34 @@ const params = {
 } as RunSegmentParams;
 
 describe('HatchetExecutionSupervisor', () => {
+    it('attaches the exact worker identity and root provider lineage to admitted work', async () => {
+        const delegate: TurnExecutor = {
+            runSegment: jest.fn(async (input: RunSegmentParams) => ({
+                tenantId: input.tenantId,
+                taskId: input.taskId,
+                boundary: { kind: 'paused', reason: 'test' },
+                taskStatus: 'working',
+            })),
+        };
+        const supervisor = new HatchetExecutionSupervisor(delegate, {
+            installationId: 'installation-1',
+            instanceId: 'instance-1',
+            workerName: 'runtime-instance-1',
+        });
+
+        await supervisor.runSegment({ ...params, rootProviderRunId: 'provider-root-1' });
+
+        expect(delegate.runSegment).toHaveBeenCalledWith(expect.objectContaining({
+            rootProviderRunId: 'provider-root-1',
+            runtimeOwner: {
+                installationId: 'installation-1',
+                instanceId: 'instance-1',
+                workerName: 'runtime-instance-1',
+                rootProviderRunId: 'provider-root-1',
+            },
+        }));
+    });
+
     it('aborts active segments and rejects new admission', async () => {
         let observedSignal: AbortSignal | undefined;
         const delegate: TurnExecutor = {

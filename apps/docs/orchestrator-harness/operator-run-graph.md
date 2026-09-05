@@ -297,3 +297,9 @@ Expected graph shape:
 ## Acceptance
 
 Phase 2 orchestration is acceptable when a single root task can render as one root `AgentRun` with child agent edges, turn trace references, grouped events/logs, input/output previews, and raw Hatchet IDs available only as debug detail.
+as `Recovering after worker replacement`. The expired/inactive attempt is
+superseded under the existing logical turn, while its replacement has a new claim
+and higher fence. Provider failure rows belonging to the superseded worker are
+diagnostic and must not turn the task red. The graph remains nonterminal until a
+replacement commits, another authoritative terminal wins, or the original root
+deadline produces `HATCHET_WORKER_RECOVERY_DEADLINE_EXCEEDED`.

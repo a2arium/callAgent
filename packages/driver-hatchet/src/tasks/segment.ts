@@ -61,6 +61,7 @@ export type SegmentTaskInput = JsonObject & {
     rootTaskId?: string;
     parentTaskId?: string;
     rootRunKey?: string;
+    rootProviderRunId?: string;
     recoveryGeneration?: string;
 };
 
@@ -92,14 +93,14 @@ export type SegmentTaskOutput = JsonObject & {
     turnTraceId?: string;
     executionMetadata?: { origin?: 'cache' | 'runtime' };
     turnDisposition?: 'executed' | 'queued' | 'matching_replay' | 'superseded' |
-        'terminal_replay' | 'lease_expired_recovery_staged';
+        'terminal_replay' | 'lease_expired_recovery_staged' | 'worker_lifetime_lost_recovery_staged';
     claimId?: string;
     turnFence?: string;
     claimedGeneration?: string;
     turnSeq?: number;
     associatedTurnSeq?: number;
     recoveryHint?: {
-        reason: 'lease_expired';
+        reason: 'lease_expired' | 'worker_lifetime_lost';
         generation: string;
         deliveryKey: string;
         turnSeq: number;
@@ -174,6 +175,7 @@ async function executeSegmentTaskInner(
             runtimeAttemptKey: `hatchet:${ctx.workflowRunId()}:${ctx.taskRunExternalId()}`,
             runtimeSurface: 'hatchet',
             abortSignal: ctx.abortController.signal,
+            ...(input.rootProviderRunId ? { rootProviderRunId: input.rootProviderRunId } : {}),
         });
         const output = toSegmentTaskOutput(result);
         if (deps.driverRuns) {

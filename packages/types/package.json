@@ -23,6 +23,10 @@
       "import": "./dist/task-turn-superseded.js",
       "types": "./dist/task-turn-superseded.d.ts"
     },
+    "./hatchet-worker-lifetime-lost": {
+      "import": "./dist/hatchet-worker-lifetime-lost.js",
+      "types": "./dist/hatchet-worker-lifetime-lost.d.ts"
+    },
     "./task-turn-coordinator-state": {
       "import": "./dist/task-turn-coordinator-state.js",
       "types": "./dist/task-turn-coordinator-state.d.ts"

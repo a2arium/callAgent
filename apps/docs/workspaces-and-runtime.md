@@ -166,6 +166,18 @@ exists. `HATCHET_SCHEDULE_API_UNAVAILABLE` remains a separate code for the
 schedule REST API. API-only installations with workers managed elsewhere can
 set `CALLAGENT_HATCHET_WORKER_READINESS=disabled`.
 
+Worker readiness is installation-wide: a healthy response includes
+`eligibleWorkerInstances` with the exact process and Hatchet worker names that may
+accept work. Each worker separately gates admission on its own instance health. If
+Hatchet deactivates that worker, CallAgent records the failed health lease first,
+closes admission, aborts managed mutations, and exits the worker process non-zero.
+The deployment supervisor must replace the complete process.
+
+An active turn interrupted this way remains nonterminal. CallAgent stages the same
+durable generation and logical turn under a new worker claim and higher fence. If no
+replacement succeeds before the original root deadline, the task fails with
+`HATCHET_WORKER_RECOVERY_DEADLINE_EXCEEDED`.
+
 Provider-reported root failures are reconciled into the durable task snapshot,
 semantic run state, final status outbox, and Observer. This reconciliation is
 idempotent. A provider failure may correct only an `active_run_timeout` that

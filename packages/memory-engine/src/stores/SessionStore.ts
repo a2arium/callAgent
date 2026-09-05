@@ -33,7 +33,7 @@ export type RunnableTurnRequest = {
     deliveryKey: string;
     runtimeSurface: 'direct' | 'in_process' | 'hatchet';
     recoveryHint?: {
-        reason: 'lease_expired';
+        reason: 'lease_expired' | 'worker_lifetime_lost';
         generation: string;
         deliveryKey: string;
         turnSeq: number;

@@ -41,6 +41,7 @@ import { serializeDriverRunError, type DriverRunsRepository } from '../driverRun
 import { withHatchetTaskLogging } from '../hatchetLogging.js';
 import { logger } from '@a2arium/callagent-utils';
 import { convergeProviderTerminal } from '../providerTerminalReconciler.js';
+import { hasHatchetWorkerLifetimeLostCause } from '@a2arium/callagent-types/hatchet-worker-lifetime-lost';
 
 export const TASK_TASK_NAME = 'aplret.task';
 export const TASK_STATE_TASK_NAME = 'aplret.task-state';
@@ -250,6 +251,9 @@ async function executeTaskTaskInner(
     ctx: DurableContext<TaskTaskInput>,
     deps?: TaskTaskDeps
 ): Promise<TaskTaskOutput> {
+    const rootProviderRunId = typeof (ctx as { workflowRunId?: unknown }).workflowRunId === 'function'
+        ? ctx.workflowRunId()
+        : undefined;
     const protocolNames = deps?.protocolNames ?? DEFAULT_TASK_PROTOCOL_NAMES;
     let wake: SegmentTaskWake = { trigger: 'start', input: input.input };
     let idempotencyKey = input.idempotencyKey;
@@ -308,6 +312,7 @@ async function executeTaskTaskInner(
                 rootTaskId: input.rootTaskId ?? input.taskId,
                 ...(input.parentTaskId !== undefined ? { parentTaskId: input.parentTaskId } : {}),
                 ...(input.rootRunKey !== undefined ? { rootRunKey: input.rootRunKey } : {}),
+                ...(rootProviderRunId ? { rootProviderRunId } : {}),
                 ...(recoveryGeneration !== undefined
                     ? { recoveryGeneration }
                     : {}),
@@ -351,6 +356,19 @@ async function executeTaskTaskInner(
                 recoveryGeneration = segment.claimedGeneration;
                 idempotencyKey = `${input.taskId}:turn-request:${segment.claimedGeneration}`;
                 queuedFallbackCount = 0;
+                continue;
+            }
+            if (segment.turnDisposition === 'worker_lifetime_lost_recovery_staged') {
+                if (segment.claimedGeneration === undefined) {
+                    throw new Error('TASK_TURN_PROTOCOL_STATE_UNKNOWN: worker recovery omitted claimedGeneration');
+                }
+                recoveryGeneration = segment.claimedGeneration;
+                idempotencyKey = `${input.taskId}:turn-request:${segment.claimedGeneration}`;
+                queuedFallbackCount = 0;
+                // Do not immediately submit another child from the worker that
+                // has already closed admission. A replacement/root redelivery
+                // will receive the normal durable availability signal.
+                await waitForTurnAvailability(ctx, input, attemptOrdinal, segment.turnAvailableAt, 0);
                 continue;
             }
             recoveryGeneration = undefined;
@@ -420,21 +438,21 @@ async function executeTaskTaskInner(
             if (!await runTaskState(ctx, input, deps, {
                 operation: 'project_canceled', task: input,
             }, `canceled:${idempotencyKey}`)) await finalizeRootRunAsCanceled(input, deps);
-        } else if (!isHatchetDurableEvictionAbort(error)) {
+        } else if (!isHatchetDurableEvictionAbort(error) && !isWorkerLifetimeLossAbort(error)) {
             try {
                 if (!await runTaskState(ctx, input, deps, {
                     operation: 'project_failed', task: input,
                     error: serializeDriverRunError(error) as JsonValue,
                 }, `failed:${idempotencyKey}`)) {
                     await finalizeRootRunAsFailed(input, deps, error);
-                    await convergeFailedProviderTerminal(input, deps, error);
+                    await convergeFailedProviderTerminal(input, deps, error, rootProviderRunId);
                 }
             } catch (projectionError) {
                 // A broken durable stream can prevent task.state from running.
                 // Preserve the original provider failure in the durable driver
                 // ledger so the independent reconciler can converge it later.
                 await finalizeRootRunAsFailed(input, deps, error).catch(() => undefined);
-                await convergeFailedProviderTerminal(input, deps, error).catch(() => undefined);
+                await convergeFailedProviderTerminal(input, deps, error, rootProviderRunId).catch(() => undefined);
                 console.error('HATCHET_TERMINAL_PROJECTION_FAILED', {
                     taskId: input.taskId,
                     message: projectionError instanceof Error ? projectionError.message : String(projectionError),
@@ -443,6 +461,13 @@ async function executeTaskTaskInner(
         }
         throw error;
     }
+}
+
+function isWorkerLifetimeLossAbort(error: unknown): boolean {
+    if (hasHatchetWorkerLifetimeLostCause(error)) return true;
+    const message = error instanceof Error ? error.message : String(error ?? '');
+    return message.includes('HATCHET_WORKER_LIFETIME_LOST') ||
+        /Hatchet worker is not ACTIVE/i.test(message);
 }
 
 async function runTaskState(
@@ -629,7 +654,7 @@ function validateRecoveryHint(
     input: TaskTaskInput,
     value: unknown
 ): NonNullable<SegmentTaskOutput['recoveryHint']> {
-    if (!isRecord(value) || value.reason !== 'lease_expired' ||
+    if (!isRecord(value) || (value.reason !== 'lease_expired' && value.reason !== 'worker_lifetime_lost') ||
         typeof value.generation !== 'string' || !/^(0|[1-9]\d*)$/.test(value.generation) ||
         typeof value.deliveryKey !== 'string' ||
         value.deliveryKey !== `${input.taskId}:turn-request:${value.generation}` ||
@@ -638,7 +663,7 @@ function validateRecoveryHint(
         throw new Error('TASK_TURN_PROTOCOL_STATE_UNKNOWN: invalid recovery hint');
     }
     return {
-        reason: 'lease_expired',
+        reason: value.reason,
         generation: value.generation,
         deliveryKey: value.deliveryKey,
         turnSeq: value.turnSeq as number,
@@ -983,12 +1008,14 @@ async function convergeFailedProviderTerminal(
     input: TaskTaskInput,
     deps: TaskTaskDeps | undefined,
     error: unknown,
+    providerRunId?: string,
 ): Promise<void> {
     if (deps?.sessionManager === undefined) return;
     await convergeProviderTerminal(deps.sessionManager as SessionManager, {
         tenantId: input.tenantId,
         taskId: input.taskId,
         agentId: input.agentId,
+        providerRunId,
         error,
         observedAt: new Date(),
         source: 'provider_callback',

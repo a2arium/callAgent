@@ -280,3 +280,12 @@ Production readiness is accepted when:
 - auth, tenant isolation, and production-mode UI behavior are in place;
 - the parity harness and failure drills pass under both in-process and Hatchet
   drivers for the surfaces being migrated.
+
+- Treat `HATCHET_WORKER_LIFETIME_LOST` as recoverable control flow. It must never
+  become `MODULE_EXECUTION_ERROR` or `HATCHET_PROVIDER_FAILED`. Verify that the
+  interrupted attempt is superseded, the canonical recovery intent is staged, and
+  a replacement preserves the generation, logical turn, checkpoint, and root
+  deadline while increasing the fence.
+- `/ready` reports installation-wide eligible worker instances; each segment is
+  owned by one exact instance. A stale provider failure from an instance recorded
+  in worker-recovery provenance must be ignored by terminal convergence.

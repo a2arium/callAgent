@@ -97,7 +97,7 @@ export type SegmentResult = {
     turnTraceId?: string;
     /** Internal ownership outcome used by durable runtime drivers. */
     turnDisposition?: 'executed' | 'queued' | 'matching_replay' | 'superseded' |
-        'terminal_replay' | 'lease_expired_recovery_staged';
+        'terminal_replay' | 'lease_expired_recovery_staged' | 'worker_lifetime_lost_recovery_staged';
     /** Claim used by this attempt; retained only for bounded driver diagnostics. */
     turnClaim?: { claimId: string; fence: string; claimedGeneration: string; turnSeq: number };
     /** Logical turn this attempt executed, replayed, or was queued behind. */
@@ -131,6 +131,9 @@ export type RunSegmentParams = {
     prepared?: PreparedTurnInvocation;
     /** Cancellation supplied by the runtime driver for this execution attempt. */
     abortSignal?: AbortSignal;
+    /** Trusted identity of the Hatchet worker/root which owns this provider attempt. */
+    runtimeOwner?: import('../orchestration/TaskTurnCoordinator.js').TaskTurnRuntimeOwner;
+    rootProviderRunId?: string;
 };
 
 /**

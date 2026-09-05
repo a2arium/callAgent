@@ -169,6 +169,7 @@ import {
 import { assertTaskEffectActive } from './TaskEffectRegistration.js';
 import {
     assertCurrentTaskTurn,
+    finalizeTaskTurnsForTerminalSnapshot,
     markTaskTurnDispatchEnqueued,
     readTaskTurnCoordinator,
 } from './TaskTurnCoordinator.js';
@@ -6216,6 +6217,29 @@ export class TaskEngine {
         }
 
         const deadline = inspection.deadline;
+        const dueSnapshot = await this.sessionManager!.load(params.tenantId, params.taskId);
+        const dueState = (dueSnapshot?.snapshot as Record<string, unknown> | undefined) ?? {};
+        let workerRecoveryPending = false;
+        try {
+            workerRecoveryPending = readTaskTurnCoordinator(dueState, {
+                tenantId: params.tenantId,
+                taskId: params.taskId,
+            }).dispatchIntent?.recovery?.reason === 'worker_lifetime_lost';
+        } catch {
+            // Legacy snapshots follow the ordinary timeout path.
+        }
+        if (workerRecoveryPending) {
+            await this.failWorkerRecoveryDeadline({
+                tenantId: params.tenantId,
+                taskId: params.taskId,
+                agentId: params.agentId ?? dueSnapshot?.agentId,
+                deadline,
+            });
+            defaultMetricsRegistry.increment('task_run_timeout_total', {
+                disposition: 'worker_recovery_exhausted',
+            });
+            return 'terminal';
+        }
         await this.cancelTask({
             tenantId: params.tenantId,
             taskId: params.taskId,
@@ -6243,6 +6267,58 @@ export class TaskEngine {
             disposition: terminalDisposition,
         });
         return terminalDisposition;
+    }
+
+    private async failWorkerRecoveryDeadline(params: {
+        tenantId: string;
+        taskId: string;
+        agentId?: string;
+        deadline: RootRunDeadline;
+    }): Promise<void> {
+        const claimedAt = params.deadline.expiresAt;
+        const reconciled = await reconcileSnapshotMutation({
+            session: this.sessionManager!,
+            tenantId: params.tenantId,
+            sessionId: params.taskId,
+            agentId: params.agentId,
+            operation: 'task.worker_recovery_deadline.claim',
+            mutate: ({ snapshot }) => {
+                const terminal = claimTaskTerminalInSnapshot(snapshot, {
+                    taskId: params.taskId,
+                    state: 'failed',
+                    claimedAt,
+                    reason: 'worker_recovery_deadline_exceeded',
+                    status: {
+                        state: 'failed',
+                        timestamp: claimedAt,
+                        metadata: {
+                            code: 'HATCHET_WORKER_RECOVERY_DEADLINE_EXCEEDED',
+                            expiresAt: params.deadline.expiresAt,
+                            timeoutMs: params.deadline.timeoutMs,
+                            source: 'root_deadline',
+                        },
+                    },
+                });
+                const finalized = finalizeTaskTurnsForTerminalSnapshot({
+                    snapshot: terminal.snapshot,
+                    tenantId: params.tenantId,
+                    taskId: params.taskId,
+                });
+                return terminal.changed || finalized.changed
+                    ? { kind: 'write' as const, snapshot: finalized.snapshot, value: terminal.disposition }
+                    : { kind: 'noop' as const, value: terminal.disposition };
+            },
+        });
+        await this.ensureTaskTerminalPublished({
+            tenantId: params.tenantId,
+            taskId: params.taskId,
+            agentId: params.agentId,
+            snapshot: reconciled.snapshot,
+        });
+        defaultMetricsRegistry.increment('task_turn_worker_recovery_total', {
+            outcome: 'deadline_exceeded',
+            runtimeSurface: 'hatchet',
+        });
     }
 
     private taskRunTimeoutTerminalDisposition(
@@ -6662,6 +6738,30 @@ export class TaskEngine {
 
             const remainingMs = expiresAtMs - now();
             if (remainingMs <= 0) {
+                let workerRecoveryPending = false;
+                try {
+                    workerRecoveryPending = readTaskTurnCoordinator(snapshot, {
+                        tenantId: params.tenantId,
+                        taskId: params.taskId,
+                    }).dispatchIntent?.recovery?.reason === 'worker_lifetime_lost';
+                } catch {
+                    // Legacy snapshots follow the ordinary timeout path.
+                }
+                if (workerRecoveryPending) {
+                    await this.failWorkerRecoveryDeadline({
+                        tenantId: params.tenantId,
+                        taskId: params.taskId,
+                        agentId: params.agentId,
+                        deadline: deadlineValue,
+                    });
+                    const after = await this.sessionManager!.load(params.tenantId, params.taskId);
+                    const afterSnapshot = (after?.snapshot as Record<string, unknown> | undefined) ?? {};
+                    const authoritative = terminalStatusFromSnapshot(afterSnapshot, params.taskId);
+                    if (authoritative === undefined) {
+                        throw new Error(`Task ${params.taskId} worker recovery deadline did not converge.`);
+                    }
+                    return { status: authoritative, lifecycle: 'terminal', deadline: deadlineValue };
+                }
                 await this.cancelTask({
                     tenantId: params.tenantId,
                     taskId: params.taskId,

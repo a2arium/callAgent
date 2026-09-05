@@ -268,7 +268,11 @@ function CoordinationCard(props: { coordination: TaskCoordinationView }): React.
       <FactRow label="Lease">{active ? `${active.leaseState} · expires ${formatRelative(active.expiresAt)}` : 'Not owned'}</FactRow>
       <FactRow label="Heartbeat">{active ? formatRelative(active.heartbeatAt) : 'Not applicable'}</FactRow>
       <FactRow label="Dispatch">{value.dispatchIntent
-        ? `${value.dispatchIntent.recoveryReason === 'lease_expired' ? 'Recovering after lease expiry' : value.dispatchIntent.state} · generation ${value.dispatchIntent.generation}`
+        ? `${value.dispatchIntent.recoveryReason === 'lease_expired'
+          ? 'Recovering after lease expiry'
+          : value.dispatchIntent.recoveryReason === 'worker_lifetime_lost'
+            ? 'Recovering after worker replacement'
+            : value.dispatchIntent.state} · generation ${value.dispatchIntent.generation}`
         : 'None'}</FactRow>
       <FactRow label="Issues">{issueText}</FactRow>
       {active ? (

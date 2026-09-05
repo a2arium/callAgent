@@ -74,7 +74,10 @@ export {
     markTaskTurnDispatchEnqueued,
     recoverExpiredTaskTurnClaim,
     recoverExpiredTaskTurnClaimInSnapshot,
+    recoverWorkerLostTaskTurnClaim,
+    recoverWorkerLostTaskTurnClaimInSnapshot,
     readTaskTurnCoordinator,
+    readWorkerLifetimeRecoveryProvenance,
     releaseTaskTurn,
     renewTaskTurnClaim,
     settleUnclaimedTaskTurnInSnapshot,
@@ -83,6 +86,9 @@ export {
     type TaskTurnClaim,
     type TaskTurnCoordinatorState,
     type TaskTurnRecoveryDisposition,
+    type TaskTurnRecoveryReason,
+    type TaskTurnRuntimeOwner,
+    type WorkerLifetimeRecoveryProvenance,
 } from './orchestration/TaskTurnCoordinator.js';
 export {
     sweepExpiredTaskTurnClaims,

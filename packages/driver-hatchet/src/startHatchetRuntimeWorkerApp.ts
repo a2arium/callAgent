@@ -19,6 +19,7 @@ import {
     HatchetExecutionSupervisor,
     HatchetWorkerStreamUnavailableError,
 } from './hatchetExecutionSupervisor.js';
+import { HatchetWorkerLifetimeLostError } from '@a2arium/callagent-types/hatchet-worker-lifetime-lost';
 
 export type HatchetRuntimeWorkerApp = {
     composition: RuntimeCompositionRootInternal;
@@ -29,6 +30,9 @@ export type HatchetRuntimeWorkerApp = {
         lastError?: string;
         activeExecutions: number;
         drainTimedOut: boolean;
+        instanceId: string;
+        workerName: string;
+        lastHeartbeatAt?: string;
     };
     shutdown: () => Promise<void>;
 };
@@ -126,8 +130,14 @@ export async function startHatchetRuntimeWorkerApp(
         },
     });
 
-    const workerName = `${options?.workerName ?? process.env.HATCHET_WORKER_NAME ?? 'aplret-runtime-worker'}-${randomUUID().slice(0, 8)}`;
-    const executionSupervisor = new HatchetExecutionSupervisor(composition.turnExecutor);
+    const instanceId = randomUUID();
+    const installationId = process.env.CALLAGENT_RUNTIME_INSTALLATION_ID?.trim() || 'default';
+    const workerName = `${options?.workerName ?? process.env.HATCHET_WORKER_NAME ?? 'aplret-runtime-worker'}-${instanceId.slice(0, 8)}`;
+    const executionSupervisor = new HatchetExecutionSupervisor(composition.turnExecutor, {
+        installationId,
+        instanceId,
+        workerName,
+    });
     const started = await startOutboxWorker({
         eventBus,
         prisma: sessionStore.getPrismaClient(),
@@ -148,6 +158,7 @@ export async function startHatchetRuntimeWorkerApp(
     let terminalTimer: ReturnType<typeof setInterval> | undefined;
     let state: 'ready' | 'failed' | 'stopping' | 'stopped' = 'ready';
     let lastError: string | undefined;
+    let lastHeartbeatAt: string | undefined;
     let drainTimedOut = false;
     let workerStopPromise: Promise<void> | undefined;
     let shutdownPromise: Promise<void> | undefined;
@@ -164,9 +175,9 @@ export async function startHatchetRuntimeWorkerApp(
         if (terminalTimer) clearInterval(terminalTimer);
         started.stopReconcilers();
         void healthMonitor?.stop();
-        const failure = error instanceof HatchetWorkerStreamUnavailableError
+        const failure = error instanceof HatchetWorkerLifetimeLostError
             ? error
-            : new HatchetWorkerStreamUnavailableError(lastError);
+            : new HatchetWorkerLifetimeLostError(lastError, { installationId, instanceId, workerName }, error);
         executionSupervisor.abortAll(failure);
         workerStopPromise ??= started.worker.stop();
         void workerStopPromise.catch(() => undefined);
@@ -177,7 +188,10 @@ export async function startHatchetRuntimeWorkerApp(
         healthMonitor = await startWorkerHealthMonitor({
             prisma: sessionStore.getPrismaClient(), hatchet: started.hatchet,
             workerName,
+            instanceId,
+            installationId,
             onStreamUnavailable: failWorker,
+            onHealthy: (heartbeatAt) => { lastHeartbeatAt = heartbeatAt.toISOString(); },
         });
         if (lastError !== undefined) throw new Error(lastError);
         const terminalReconciler = new ProviderTerminalReconciler(
@@ -214,6 +228,9 @@ export async function startHatchetRuntimeWorkerApp(
             ...(lastError ? { lastError } : {}),
             activeExecutions: executionSupervisor.activeCount,
             drainTimedOut,
+            instanceId,
+            workerName,
+            ...(lastHeartbeatAt ? { lastHeartbeatAt } : {}),
         }),
         shutdown: () => {
             shutdownPromise ??= (async () => {

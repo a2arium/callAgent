@@ -30,11 +30,14 @@ import {
     markTaskTurnExecuting,
     releaseUnstartedTaskTurn,
     recoverExpiredTaskTurnClaim,
+    recoverWorkerLostTaskTurnClaim,
     renewTaskTurnClaim,
     requestTaskTurn,
     resolveTaskTurnLeaseConfig,
     type TaskTurnClaim,
+    type TaskTurnRuntimeOwner,
 } from '../orchestration/TaskTurnCoordinator.js';
+import { isHatchetWorkerLifetimeLostError } from '@a2arium/callagent-types/hatchet-worker-lifetime-lost';
 import { defaultMetricsRegistry } from '../observability/metrics.js';
 import { readDurableTaskTerminal } from '../orchestration/TaskLifecycle.js';
 import { isTaskLifecycleTerminalError } from '@a2arium/callagent-types/task-lifecycle-terminal';
@@ -184,6 +187,7 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
                 idempotencyKey,
                 runtimeSurface: params.runtimeSurface,
                 wake,
+                runtimeOwner: params.runtimeOwner,
             });
             if (admission.result.staged) {
                 await this.appendAcceptedWakeEvent(tenantId, taskId, wake);
@@ -240,7 +244,7 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
                     taskId,
                     agentId,
                     idempotencyKey,
-                    claim: admission.result.claim,
+                claim: admission.result.claim,
                 });
                 if (disposition === undefined) {
                     await this.appendAttemptEvent('turn.attempt_finished', {
@@ -340,6 +344,7 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
             idempotencyKey,
             runtimeSurface: params.runtimeSurface,
             recoveryGeneration: params.recoveryGeneration,
+            runtimeOwner: params.runtimeOwner,
         });
 
         if (admission.result.staged) {
@@ -453,6 +458,8 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
                 agentId: preparedWake.agentId,
                 idempotencyKey,
                 claim: admission.result.claim,
+                runtimeOwner: params.runtimeOwner,
+                executionSignal: executionAbort.controller.signal,
             });
             if (disposition === undefined) {
                 await this.appendAttemptEvent('turn.attempt_finished', {
@@ -539,6 +546,7 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
         runtimeSurface?: 'direct' | 'in_process' | 'hatchet';
         wake: RunSegmentParams['wake'];
         recoveryGeneration?: string;
+        runtimeOwner?: TaskTurnRuntimeOwner;
     }) {
         let prepared: PreparedSegmentWake | undefined;
         const admitted = await requestTaskTurn({
@@ -549,6 +557,7 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
             ownerId: `segment:${process.pid}`,
             requestKey: params.idempotencyKey,
             runtimeSurface: params.runtimeSurface,
+            runtimeOwner: params.runtimeOwner,
             recoveryGeneration: params.recoveryGeneration,
             allowInitialize: params.wake.trigger === 'start' || params.wake.trigger === 'conversation',
             stageWake: params.recoveryGeneration !== undefined ? undefined : (snapshot, storageNow) => {
@@ -678,7 +687,32 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
         agentId?: string;
         idempotencyKey: string;
         claim: TaskTurnClaim;
-    }): Promise<'superseded' | 'terminal_replay' | 'lease_expired_recovery_staged' | undefined> {
+        runtimeOwner?: TaskTurnRuntimeOwner;
+        executionSignal?: AbortSignal;
+    }): Promise<'superseded' | 'terminal_replay' | 'lease_expired_recovery_staged' | 'worker_lifetime_lost_recovery_staged' | undefined> {
+        const workerLifetimeLost = params.executionSignal?.aborted === true &&
+            isHatchetWorkerLifetimeLostError(params.executionSignal.reason) &&
+            params.runtimeOwner !== undefined;
+        if (workerLifetimeLost) {
+            const recovery = await recoverWorkerLostTaskTurnClaim({
+                session: this.sessionManager,
+                tenantId: params.tenantId,
+                taskId: params.taskId,
+                agentId: params.agentId,
+                expectedClaim: params.claim,
+                runtimeOwner: params.runtimeOwner!,
+            });
+            const disposition = recovery.disposition === 'terminal'
+                ? 'terminal_replay' as const
+                : recovery.disposition === 'recovery_staged' || recovery.disposition === 'already_recovering'
+                    ? 'worker_lifetime_lost_recovery_staged' as const
+                    : recovery.disposition === 'competing_owner' || recovery.disposition === 'settled'
+                        ? 'superseded' as const
+                        : undefined;
+            if (disposition === undefined) return undefined;
+            await this.appendRecoveryAttemptClosure(params, disposition, recovery.disposition, 'worker_lifetime_lost');
+            return disposition;
+        }
         if (!hasSupersedingCause(params.error)) return undefined;
         const recovery = await recoverExpiredTaskTurnClaim({
             session: this.sessionManager,
@@ -721,6 +755,35 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
         return disposition;
     }
 
+    private async appendRecoveryAttemptClosure(
+        params: { tenantId: string; taskId: string; idempotencyKey: string; claim: TaskTurnClaim },
+        disposition: 'superseded' | 'terminal_replay' | 'worker_lifetime_lost_recovery_staged',
+        recoveryDisposition: string,
+        reason: 'worker_lifetime_lost',
+    ): Promise<void> {
+        try {
+            await this.sessionManager.appendEvent(params.tenantId, params.taskId, 'turn.superseded', {
+                requestKey: params.idempotencyKey,
+                claimId: params.claim.claimId,
+                fence: params.claim.fence,
+                reason,
+                recoveryDisposition,
+                errorCode: 'HATCHET_WORKER_LIFETIME_LOST',
+            });
+            await this.appendAttemptEvent('turn.attempt_finished', {
+                tenantId: params.tenantId,
+                taskId: params.taskId,
+                idempotencyKey: params.idempotencyKey,
+                claim: params.claim,
+                disposition,
+                status: 'superseded',
+                reason,
+            });
+        } catch {
+            // The snapshot recovery CAS is authoritative; projection is repairable.
+        }
+    }
+
     private async appendAttemptEvent(
         type: 'turn.attempt_started' | 'turn.attempt_finished',
         params: {
@@ -730,7 +793,7 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
             claim?: TaskTurnClaim;
             attemptKey?: string;
             disposition: 'executed' | 'queued' | 'matching_replay' | 'superseded' |
-                'terminal_replay' | 'lease_expired_recovery_staged';
+                'terminal_replay' | 'lease_expired_recovery_staged' | 'worker_lifetime_lost_recovery_staged';
             status?: string;
             authoritativeTerminal?: boolean;
             deliveryKey?: string;

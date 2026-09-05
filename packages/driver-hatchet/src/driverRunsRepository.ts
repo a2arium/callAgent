@@ -59,6 +59,20 @@ export type DriverRunTaskSelector = {
 export class DriverRunsRepository {
     constructor(private readonly prisma: PrismaClient) {}
 
+    async latestRootRun(selector: DriverRunTaskSelector): Promise<{ providerRunId: string; status: string } | undefined> {
+        const row = await this.prisma.driverRun.findFirst({
+            where: {
+                tenantId: selector.tenantId,
+                taskId: selector.taskId,
+                operation: { in: ['agent.run', 'agent.run.recovery'] },
+                providerRunId: { not: null },
+            },
+            orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
+            select: { providerRunId: true, status: true },
+        });
+        return row?.providerRunId ? { providerRunId: row.providerRunId, status: row.status } : undefined;
+    }
+
     async upsertByProviderRunId(record: DriverRunRecord & { providerRunId: string }): Promise<void> {
         await this.prisma.driverRun.upsert({
             where: { providerRunId: record.providerRunId },
@@ -131,7 +145,7 @@ export class DriverRunsRepository {
             where: {
                 tenantId: record.tenantId,
                 taskId: record.taskId,
-                operation: { in: ['agent.run', 'task.start'] },
+                operation: { in: ['agent.run', 'agent.run.recovery', 'task.start'] },
             },
             data: {
                 status: record.status,

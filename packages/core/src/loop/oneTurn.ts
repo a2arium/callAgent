@@ -35,12 +35,17 @@ import {
     sanitizedConsentPrompt,
 } from './manifestConsent.js';
 import type { IntentConsentReceipt } from './types.js';
+import { isHatchetWorkerLifetimeLostError } from '@a2arium/callagent-types/hatchet-worker-lifetime-lost';
 
 type MemoryWriterWithApply = MemoryWriter & {
     __applyToMental?: <S>(m: MentalState<S>) => MentalState<S>;
 };
 
 const log = logger.createLogger({ prefix: 'oneTurn' });
+
+function rethrowRuntimeControlFlow(error: unknown): void {
+    if (isHatchetWorkerLifetimeLostError(error)) throw error;
+}
 
 export type AttentionSignal = unknown;
 
@@ -204,6 +209,7 @@ export async function oneTurn<
         alpha = await runWithTiming('attention', () => mods.attention(mPrev, env, mem));
     } catch (error) {
         if (error instanceof InvariantError) throw error;
+        rethrowRuntimeControlFlow(error);
         const errorObj = error instanceof Error ? error : new Error(String(error));
         throw new ModuleExecutionError(FrameworkModule.Attention, errorObj.message, errorObj);
     }
@@ -216,6 +222,7 @@ export async function oneTurn<
         o = await runWithTiming('perception', () => mods.perception(env, alpha, mem));
     } catch (error) {
         if (error instanceof InvariantError) throw error;
+        rethrowRuntimeControlFlow(error);
         const errorObj = error instanceof Error ? error : new Error(String(error));
         throw new ModuleExecutionError(FrameworkModule.Perception, errorObj.message, errorObj);
     }
@@ -245,6 +252,7 @@ export async function oneTurn<
         });
     } catch (error) {
         if (error instanceof InvariantError) throw error;
+        rethrowRuntimeControlFlow(error);
         const errorObj = error instanceof Error ? error : new Error(String(error));
         throw new ModuleExecutionError(FrameworkModule.Learning, errorObj.message, errorObj);
     }
@@ -268,6 +276,7 @@ export async function oneTurn<
         }
     } catch (error) {
         if (error instanceof InvariantError) throw error;
+        rethrowRuntimeControlFlow(error);
         const errorObj = error instanceof Error ? error : new Error(String(error));
         throw new ModuleExecutionError(FrameworkModule.Policy, errorObj.message, errorObj);
     }
@@ -320,6 +329,7 @@ export async function oneTurn<
         sh = await runWithTiming('shield', () => mods.shield(m1, chosen, mem));
     } catch (error) {
         if (error instanceof InvariantError) throw error;
+        rethrowRuntimeControlFlow(error);
         const errorObj = error instanceof Error ? error : new Error(String(error));
         throw new ModuleExecutionError(FrameworkModule.Shield, errorObj.message, errorObj);
     }
@@ -417,6 +427,7 @@ export async function oneTurn<
         }
     } catch (error) {
         if (error instanceof InvariantError) throw error;
+        rethrowRuntimeControlFlow(error);
         const errorObj = error instanceof Error ? error : new Error(String(error));
         throw new ModuleExecutionError(FrameworkModule.Execution, errorObj.message, errorObj);
     } finally {
@@ -433,6 +444,7 @@ export async function oneTurn<
             : await runWithTiming('transition', () => mods.transition(env, exec, m1, mem));
     } catch (error) {
         if (error instanceof InvariantError) throw error;
+        rethrowRuntimeControlFlow(error);
         const errorObj = error instanceof Error ? error : new Error(String(error));
         throw new ModuleExecutionError(FrameworkModule.Transition, errorObj.message, errorObj);
     }

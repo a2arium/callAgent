@@ -35,7 +35,7 @@ type ScannableCoordinator = {
         runtimeSurface: 'direct' | 'in_process' | 'hatchet';
         createdAt: string;
         enqueuedAt?: string;
-        recovery?: { reason: 'lease_expired' };
+        recovery?: { reason: 'lease_expired' | 'worker_lifetime_lost' };
     };
 };
 
@@ -65,8 +65,8 @@ function readTurnCoordinatorForScan(snapshot: Record<string, unknown>): Scannabl
                 runtimeSurface: intent.runtimeSurface,
                 createdAt: intent.createdAt,
                 ...(typeof intent.enqueuedAt === 'string' ? { enqueuedAt: intent.enqueuedAt } : {}),
-                ...(isLeaseExpiredRecovery(intent.recovery)
-                    ? { recovery: { reason: 'lease_expired' as const } }
+                ...(readRecoveryReason(intent.recovery) !== undefined
+                    ? { recovery: { reason: readRecoveryReason(intent.recovery)! } }
                     : {}),
             };
         }
@@ -79,9 +79,10 @@ function readTurnCoordinatorForScan(snapshot: Record<string, unknown>): Scannabl
     };
 }
 
-function isLeaseExpiredRecovery(value: unknown): boolean {
-    return value !== null && typeof value === 'object' && !Array.isArray(value) &&
-        (value as Record<string, unknown>).reason === 'lease_expired';
+function readRecoveryReason(value: unknown): 'lease_expired' | 'worker_lifetime_lost' | undefined {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined;
+    const reason = (value as Record<string, unknown>).reason;
+    return reason === 'lease_expired' || reason === 'worker_lifetime_lost' ? reason : undefined;
 }
 
 function compareRunnableCursor(row: RunnableTurnRequest, cursor: RunnableTurnRequestCursor): number {
@@ -224,7 +225,7 @@ export class InMemorySessionManager implements IWorkingMemorySessionStore {
                 ...(coordinator.dispatchIntent.recovery !== undefined && coordinator.dispatchIntent.turnSeq !== undefined
                     ? {
                           recoveryHint: {
-                              reason: 'lease_expired' as const,
+                              reason: coordinator.dispatchIntent.recovery.reason,
                               generation: coordinator.dispatchIntent.generation,
                               deliveryKey: coordinator.dispatchIntent.deliveryKey,
                               turnSeq: coordinator.dispatchIntent.turnSeq,

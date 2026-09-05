@@ -379,7 +379,7 @@ export type TaskCoordinationView = {
   dispatchIntent?: {
     generation: string;
     state: 'pending' | 'enqueued' | 'overdue';
-    recoveryReason?: 'lease_expired';
+    recoveryReason?: 'lease_expired' | 'worker_lifetime_lost';
     createdAt: string;
     enqueuedAt?: string;
   };

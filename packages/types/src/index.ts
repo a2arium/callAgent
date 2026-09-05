@@ -7,6 +7,7 @@ export * from './SemanticQueryError.js';
 export * from './working-memory-version-conflict.js';
 export * from './task-lifecycle-terminal.js';
 export * from './task-turn-superseded.js';
+export * from './hatchet-worker-lifetime-lost.js';
 export * from './task-turn-coordinator-state.js';
 export * from './workingMemory.js';
 export * from './agent/agentCard.js';

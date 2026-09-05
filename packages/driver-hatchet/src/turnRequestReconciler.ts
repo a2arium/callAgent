@@ -9,6 +9,7 @@ import { logger } from '@a2arium/callagent-utils';
 import type { HatchetEventPusher } from './hatchetRuntimeDriver.js';
 import type { TaskWorkflowDeclaration } from '@hatchet-dev/typescript-sdk/v1/declaration.js';
 import type { TaskTaskInput, TaskTaskOutput } from './tasks/task.js';
+import type { DriverRunsRepository } from './driverRunsRepository.js';
 
 const log = logger.createLogger({ prefix: 'TurnRequestReconciler' });
 
@@ -17,6 +18,8 @@ export type TurnRequestReconcilerOptions = {
     batchSize?: number;
     random?: () => number;
     rootTask?: Pick<TaskWorkflowDeclaration<TaskTaskInput, TaskTaskOutput>, 'runNoWait'>;
+    driverRuns?: DriverRunsRepository;
+    providerStatus?: (providerRunId: string) => Promise<string>;
 };
 
 export class TurnRequestReconciler {
@@ -52,7 +55,7 @@ export class TurnRequestReconciler {
                 for (let offset = 0; offset < rows.length; offset += 4) {
                     await Promise.all(rows.slice(offset, offset + 4).map(async (row) => {
                         const tenantTaskKey = encodeTenantTaskKey(row.tenantId, row.sessionId);
-                        await this.reconstructMissingInitialRoot(row, tenantTaskKey);
+                        await this.ensureRecoveryRoot(row, tenantTaskKey);
                         await this.events.push(
                             `task-turn-available:${tenantTaskKey}`,
                             {
@@ -128,23 +131,35 @@ export class TurnRequestReconciler {
         return Math.round((this.options.intervalMs ?? 5_000) * (0.75 + random() * 0.5));
     }
 
-    private async reconstructMissingInitialRoot(
+    private async ensureRecoveryRoot(
         row: {
             tenantId: string;
             sessionId: string;
             agentId: string;
             generation: string;
             deliveryKey: string;
+            recoveryHint?: { reason: 'lease_expired' | 'worker_lifetime_lost' };
         },
         tenantTaskKey: string
     ): Promise<void> {
-        if (row.generation !== '1' || this.options.rootTask === undefined) return;
+        if (this.options.rootTask === undefined) return;
+        const workerRecovery = row.recoveryHint?.reason === 'worker_lifetime_lost';
+        if (!workerRecovery && row.generation !== '1') return;
+        if (workerRecovery && this.options.driverRuns !== undefined) {
+            const latest = await this.options.driverRuns.latestRootRun({ tenantId: row.tenantId, taskId: row.sessionId });
+            if (latest !== undefined) {
+                const providerStatus = this.options.providerStatus
+                    ? await this.options.providerStatus(latest.providerRunId).catch(() => latest.status)
+                    : latest.status;
+                if (!['FAILED', 'CANCELLED', 'CANCELED', 'failed', 'canceled', 'cancelled'].includes(providerStatus)) return;
+            }
+        }
         const loaded = await this.sessions.load(row.tenantId, row.sessionId);
         const snapshot = asRecord(loaded?.snapshot);
         const meta = asRecord(snapshot.meta);
         if (!Object.prototype.hasOwnProperty.call(meta, 'initialInput')) return;
         const rootRunKey = `${tenantTaskKey}:root:1`;
-        await this.options.rootTask.runNoWait({
+        const ref = await this.options.rootTask.runNoWait({
             tenantId: row.tenantId,
             taskId: row.sessionId,
             rootTaskId: row.sessionId,
@@ -165,6 +180,18 @@ export class TurnRequestReconciler {
                 rootRunKey,
                 deliveryKey: row.deliveryKey,
             },
+        }) as { runId: Promise<string> | string };
+        const providerRunId = await ref.runId;
+        await this.options.driverRuns?.upsertByProviderRunId({
+            providerRunId,
+            tenantId: row.tenantId,
+            taskId: row.sessionId,
+            agentId: row.agentId,
+            idempotencyKey: row.deliveryKey,
+            rootTaskId: row.sessionId,
+            rootRunKey,
+            operation: workerRecovery ? 'agent.run.recovery' : 'agent.run',
+            status: 'queued',
         });
         defaultMetricsRegistry.increment('task_turn_dispatch_recovery_total', {
             runtimeSurface: 'hatchet',

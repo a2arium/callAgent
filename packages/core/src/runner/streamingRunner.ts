@@ -43,6 +43,7 @@ import { loadAgentIndexIfPresent } from '../plugin/AgentIndexLoader.js';
 import { resolveActiveRunTimeout, resolveTerminalDrainTimeout } from './backgroundTaskTimeout.js';
 import { readDurableTaskTerminal } from '../orchestration/TaskLifecycle.js';
 import { createTerminalDeliveryGate } from './terminalDeliveryGate.js';
+import { hasHatchetWorkerLifetimeLostCause } from '@a2arium/callagent-types/hatchet-worker-lifetime-lost';
 import {
     ArtifactStorageUnavailableError,
     createArtifactFactory,
@@ -700,6 +701,7 @@ export async function runAgentWithStreamingDetailed(
                 };
             } catch (error: unknown) {
                 await cleanupExecution?.().catch(() => undefined);
+                if (hasHatchetWorkerLifetimeLostCause(error)) throw error;
                 // Use agentLogger here for error
                 agentLogger.error(`Unhandled Agent Execution Error`, error, {
                     taskId: taskCtx.task.id

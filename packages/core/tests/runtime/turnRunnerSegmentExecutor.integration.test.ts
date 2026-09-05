@@ -16,13 +16,14 @@ import { setPendingTasks } from '../../src/orchestration/Handles.js';
 import { readProcessedSegmentKeys } from '../../src/runtime/segmentProcessedKeys.js';
 import { markSegmentCancellationRequested } from '../../src/runtime/segmentCancellation.js';
 import { currentTaskTurnClaim } from '../../src/runtime/segmentProcessedKeys.js';
-import { completeTaskTurnInSnapshot } from '../../src/orchestration/TaskTurnCoordinator.js';
+import { completeTaskTurnInSnapshot, readTaskTurnCoordinator } from '../../src/orchestration/TaskTurnCoordinator.js';
 import { registerTaskEffect } from '../../src/orchestration/TaskEffectRegistration.js';
 import { reconcileSnapshotMutation } from '../../src/orchestration/persistence/SnapshotRepository.js';
 import { ModuleExecutionError, FrameworkModule } from '../../src/utils/errors.js';
 import { TaskLifecycleTerminalError } from '@a2arium/callagent-types/task-lifecycle-terminal';
 import { taskChannel } from '../../src/eventbus/taskEventEmitter.js';
 import type { A2AEvent } from '../../src/shared/types/StreamingEvents.js';
+import { HatchetWorkerLifetimeLostError } from '@a2arium/callagent-types/hatchet-worker-lifetime-lost';
 
 async function persistMockTurn(
     params: Parameters<typeof TaskExecutor.executeTurn>[0],
@@ -263,6 +264,34 @@ describe('TurnRunnerSegmentExecutor integration', () => {
 
         expect(boundContexts).toEqual([expect.objectContaining({ tenantId, agentId, abortSignal: expect.any(Object) })]);
         expect(boundContexts[0]!.abortSignal?.aborted).toBe(true);
+    });
+
+    it('stages durable recovery when the exact Hatchet worker lifetime is lost', async () => {
+        const runtimeAbort = new AbortController();
+        executeTurnSpy.mockImplementation(async (params) => {
+            runtimeAbort.abort(new HatchetWorkerLifetimeLostError('worker inactive'));
+            throw params.ctx.abortSignal?.reason;
+        });
+        const result = await executor.runSegment({
+            tenantId,
+            taskId: `${taskId}-worker-loss`,
+            agentId,
+            idempotencyKey: `${taskId}-worker-loss:start`,
+            runtimeSurface: 'hatchet',
+            abortSignal: runtimeAbort.signal,
+            runtimeOwner: {
+                installationId: 'install-a', instanceId: 'instance-a',
+                workerName: 'worker-a', rootProviderRunId: 'provider-root-a',
+            },
+            wake: { trigger: 'start', input: {} },
+        });
+
+        expect(result.turnDisposition).toBe('worker_lifetime_lost_recovery_staged');
+        expect(result.taskStatus).not.toBe('failed');
+        const stored = await sessionManager.load(tenantId, `${taskId}-worker-loss`);
+        expect(readTaskTurnCoordinator(stored?.snapshot).dispatchIntent).toMatchObject({
+            generation: '1', turnSeq: 1, recovery: { reason: 'worker_lifetime_lost' },
+        });
     });
 
     it('enforces the admitted root deadline before acquiring the initial turn', async () => {

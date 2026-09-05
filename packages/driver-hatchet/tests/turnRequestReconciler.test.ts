@@ -102,4 +102,53 @@ describe('TurnRequestReconciler', () => {
         expect(state.meta?.turnCoordinator?.active).toBeUndefined();
         expect(state.meta?.turnCoordinator?.dispatchIntent?.recovery?.reason).toBe('lease_expired');
     });
+
+    it('starts one fresh root when worker recovery belongs to a failed provider root', async () => {
+        const clockMs = Date.parse('2026-09-05T12:00:00.000Z');
+        const sessions = new SessionManager(new InMemorySessionManager(() => clockMs));
+        const sourceClaim = {
+            claimId: 'claim-old', fence: '1', ownerId: 'worker-old', requestKey: 'task-a:start',
+            claimedGeneration: '2', turnSeq: 2, phase: 'executing', runtimeSurface: 'hatchet',
+            acquiredAt: '2026-09-05T11:00:00.000Z', heartbeatAt: '2026-09-05T11:00:01.000Z',
+            expiresAt: '2026-09-05T11:02:00.000Z',
+            runtimeOwner: {
+                installationId: 'install-a', instanceId: 'instance-old', workerName: 'worker-old',
+                rootProviderRunId: 'provider-old',
+            },
+        };
+        await sessions.saveSnapshot({
+            tenantId: 'tenant-a', sessionId: 'task-a', agentId: 'agent-a', expectedWmVersion: 0n,
+            snapshot: { meta: {
+                initialInput: { caseId: 'case-a' },
+                taskLifecycle: { taskId: 'task-a', rootTaskId: 'task-a', ancestorTaskIds: [], state: 'active' },
+                turnCoordinator: {
+                    schemaVersion: 1, nextFence: '1', nextTurnSeq: 2,
+                    requestedGeneration: '2', completedGeneration: '1', runtimeSurface: 'hatchet',
+                    dispatchIntent: {
+                        generation: '2', turnSeq: 2, deliveryKey: 'task-a:turn-request:2',
+                        runtimeSurface: 'hatchet', createdAt: '2026-09-05T11:02:00.000Z',
+                        recovery: { reason: 'worker_lifetime_lost', sourceClaim, stagedAt: '2026-09-05T11:02:00.000Z' },
+                    },
+                },
+            } },
+        });
+        const runNoWait = jest.fn(async () => ({ runId: 'provider-new' }));
+        const upsertByProviderRunId = jest.fn(async () => undefined);
+        const reconciler = new TurnRequestReconciler(sessions, { push: jest.fn(async () => undefined) }, {
+            rootTask: { runNoWait } as never,
+            driverRuns: {
+                latestRootRun: jest.fn(async () => ({ providerRunId: 'provider-old', status: 'running' })),
+                upsertByProviderRunId,
+            } as never,
+            providerStatus: jest.fn(async () => 'FAILED'),
+        });
+
+        await expect(reconciler.scanOnce()).resolves.toBe(1);
+        expect(runNoWait).toHaveBeenCalledWith(expect.objectContaining({
+            recoveryGeneration: '2', recoveryDeliveryKey: 'task-a:turn-request:2',
+        }), expect.any(Object));
+        expect(upsertByProviderRunId).toHaveBeenCalledWith(expect.objectContaining({
+            providerRunId: 'provider-new', operation: 'agent.run.recovery', status: 'queued',
+        }));
+    });
 });

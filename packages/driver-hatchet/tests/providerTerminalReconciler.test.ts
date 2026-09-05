@@ -32,7 +32,7 @@ describe('provider terminal convergence', () => {
             observedAt: new Date('2026-09-04T00:00:00.000Z'),
         });
 
-        expect(changed).toBe(true);
+        expect(changed).toBe('converged');
         expect(readDurableTaskTerminal(snapshot)).toMatchObject({
             state: 'failed',
             status: { metadata: { code: 'HATCHET_DURABLE_STREAM_UNAVAILABLE' } },
@@ -67,10 +67,49 @@ it('corrects only a timeout cancellation that happened after the provider failur
         error: new Error('provider ended first'),
     });
 
-    expect(changed).toBe(true);
+    expect(changed).toBe('converged');
     expect(readDurableTaskTerminal(snapshot)).toMatchObject({
         state: 'failed', status: { metadata: { supersedesDeliveryKey: 'task-a:terminal:canceled' } },
     });
+});
+
+it('does not terminalize a provider run superseded by durable worker recovery', async () => {
+    const snapshot: Record<string, unknown> = {
+        meta: {
+            workerLifetimeRecoveries: [{
+                sourceProviderRunId: 'provider-old', sourceClaimId: 'claim-old', sourceFence: '1',
+                generation: '1', turnSeq: 1, stagedAt: '2026-09-05T00:00:00.000Z',
+                replacementProviderRunId: 'provider-new', replacementClaimId: 'claim-new', replacementFence: '2',
+            }],
+        },
+    };
+    const sessions = { loadForMutation: jest.fn(async () => ({ snapshot, wmVersion: 1n, agentId: 'agent-a' })) };
+    await expect(convergeProviderTerminal(sessions as any, {
+        tenantId: 'tenant-a', taskId: 'task-a', providerRunId: 'provider-old',
+        observedAt: new Date('2026-09-05T00:01:00.000Z'), error: new Error('worker failed'),
+    })).resolves.toBe('superseded_by_recovery');
+});
+
+it('defers a failed provider observation while its exact turn claim is still active', async () => {
+    const snapshot: Record<string, unknown> = { meta: { turnCoordinator: {
+        schemaVersion: 1, nextFence: '1', nextTurnSeq: 1,
+        requestedGeneration: '1', completedGeneration: '0', runtimeSurface: 'hatchet',
+        active: {
+            claimId: 'claim-a', fence: '1', ownerId: 'worker-a', requestKey: 'task-a:start',
+            claimedGeneration: '1', turnSeq: 1, phase: 'executing', runtimeSurface: 'hatchet',
+            acquiredAt: '2026-09-05T00:00:00.000Z', heartbeatAt: '2026-09-05T00:00:01.000Z',
+            expiresAt: '2026-09-05T00:02:00.000Z',
+            runtimeOwner: {
+                installationId: 'install-a', instanceId: 'instance-a', workerName: 'worker-a',
+                rootProviderRunId: 'provider-a',
+            },
+        },
+    } } };
+    const sessions = { loadForMutation: jest.fn(async () => ({ snapshot, wmVersion: 1n, agentId: 'agent-a' })) };
+    await expect(convergeProviderTerminal(sessions as any, {
+        tenantId: 'tenant-a', taskId: 'task-a', providerRunId: 'provider-a',
+        observedAt: new Date('2026-09-05T00:01:00.000Z'), error: new Error('provider failed'),
+    })).resolves.toBe('deferred_active_claim');
 });
 
 it('records only a stable failed Hatchet provider status before reconciling terminal rows', async () => {

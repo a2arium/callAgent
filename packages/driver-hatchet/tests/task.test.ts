@@ -17,6 +17,7 @@ import {
     TASK_TASK_NAME,
 } from '../src/tasks/task.js';
 import { TaskLifecycleTerminalError } from '@a2arium/callagent-types/task-lifecycle-terminal';
+import { HatchetWorkerLifetimeLostError } from '@a2arium/callagent-types/hatchet-worker-lifetime-lost';
 import { NonRetryableError } from '@hatchet-dev/typescript-sdk/v1/task.js';
 
 function createMemorySessions(initial: Record<string, Record<string, unknown>>) {
@@ -2653,6 +2654,37 @@ describe('executeTaskTask', () => {
             ctx as never,
             { driverRuns: { finalizeRootRun } as never }
         )).rejects.toThrow('Operation cancelled by AbortSignal');
+
+        expect(finalizeRootRun).not.toHaveBeenCalled();
+    });
+
+    it('does not mark the root failed when its exact worker lifetime is lost', async () => {
+        const finalizeRootRun = jest.fn(async () => undefined);
+        const workerLoss = new HatchetWorkerLifetimeLostError('replacement worker is no longer eligible', {
+            installationId: 'installation-1',
+            instanceId: 'instance-old',
+            workerName: 'runtime-instance-old',
+            rootProviderRunId: 'provider-root-old',
+        });
+        const ctx = {
+            workflowRunId: jest.fn(() => 'provider-root-old'),
+            runChild: jest.fn(async () => {
+                throw workerLoss;
+            }),
+            runNoWaitChild: jest.fn(async () => undefined),
+        };
+
+        await expect(executeTaskTask(
+            {
+                tenantId: 'tenant-1',
+                taskId: 'task-1',
+                agentId: 'agent-1',
+                input: { value: 'hello' },
+                idempotencyKey: 'task-1:start',
+            },
+            ctx as never,
+            { driverRuns: { finalizeRootRun } as never }
+        )).rejects.toBe(workerLoss);
 
         expect(finalizeRootRun).not.toHaveBeenCalled();
     });

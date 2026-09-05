@@ -1,14 +1,10 @@
 import type { RunSegmentParams, SegmentResult, TurnExecutor } from '@a2arium/callagent-core/unstable';
 import { defaultMetricsRegistry } from '@a2arium/callagent-core/unstable';
+import { HatchetWorkerLifetimeLostError } from '@a2arium/callagent-types/hatchet-worker-lifetime-lost';
+import type { TaskTurnRuntimeOwner } from '@a2arium/callagent-core/unstable';
 
-export class HatchetWorkerStreamUnavailableError extends Error {
-    readonly code = 'HATCHET_WORKER_STREAM_UNAVAILABLE';
-
-    constructor(message = 'Hatchet worker stream is unavailable') {
-        super(message);
-        this.name = 'HatchetWorkerStreamUnavailableError';
-    }
-}
+/** @deprecated Use HatchetWorkerLifetimeLostError from callagent-types. */
+export class HatchetWorkerStreamUnavailableError extends HatchetWorkerLifetimeLostError {}
 
 export type HatchetExecutionDrainResult = {
     drained: boolean;
@@ -21,7 +17,10 @@ export class HatchetExecutionSupervisor implements TurnExecutor {
     private readonly active = new Set<Promise<unknown>>();
     private accepting = true;
 
-    constructor(private readonly delegate: TurnExecutor) {}
+    constructor(
+        private readonly delegate: TurnExecutor,
+        private readonly runtimeOwner?: Omit<TaskTurnRuntimeOwner, 'rootProviderRunId'>,
+    ) {}
 
     get activeCount(): number {
         return this.active.size;
@@ -36,7 +35,13 @@ export class HatchetExecutionSupervisor implements TurnExecutor {
             throw abortReason(this.lifetime.signal);
         }
         const combined = combineAbortSignals(params.abortSignal, this.lifetime.signal);
-        const execution = this.delegate.runSegment({ ...params, abortSignal: combined.signal });
+        const execution = this.delegate.runSegment({
+            ...params,
+            abortSignal: combined.signal,
+            ...(this.runtimeOwner !== undefined
+                ? { runtimeOwner: { ...this.runtimeOwner, ...(params.rootProviderRunId ? { rootProviderRunId: params.rootProviderRunId } : {}) } }
+                : {}),
+        });
         this.active.add(execution);
         defaultMetricsRegistry.setGauge('hatchet_worker_active_executions', this.active.size);
         try {
@@ -82,7 +87,7 @@ export class HatchetExecutionSupervisor implements TurnExecutor {
 function abortReason(signal: AbortSignal): Error {
     return signal.reason instanceof Error
         ? signal.reason
-        : new HatchetWorkerStreamUnavailableError();
+        : new HatchetWorkerLifetimeLostError();
 }
 
 function combineAbortSignals(

@@ -10,6 +10,8 @@ import {
     requestTaskTurn,
     renewTaskTurnClaim,
     recoverExpiredTaskTurnClaim,
+    recoverWorkerLostTaskTurnClaim,
+    readWorkerLifetimeRecoveryProvenance,
 } from '../src/orchestration/TaskTurnCoordinator.js';
 import { registerTaskEffect } from '../src/orchestration/TaskEffectRegistration.js';
 import { runWithSegmentIdempotencyKey } from '../src/runtime/segmentProcessedKeys.js';
@@ -44,6 +46,53 @@ async function seededSession() {
 }
 
 describe('TaskTurnCoordinator', () => {
+    it('immediately recovers the exact lost Hatchet worker without waiting for lease expiry', async () => {
+        const session = await seededSession();
+        const oldOwner = {
+            installationId: 'install-a', instanceId: 'instance-a',
+            workerName: 'worker-instance-a', rootProviderRunId: 'provider-root-a',
+        };
+        const first = await requestTaskTurn({
+            session, tenantId: 'tenant-a', taskId: 'task-a', ownerId: 'worker-a',
+            requestKey: 'task-a:start', runtimeSurface: 'hatchet', runtimeOwner: oldOwner,
+        });
+        if (first.result.disposition !== 'acquired') throw new Error('claim missing');
+
+        await expect(recoverWorkerLostTaskTurnClaim({
+            session, tenantId: 'tenant-a', taskId: 'task-a',
+            expectedClaim: first.result.claim,
+            runtimeOwner: { ...oldOwner, instanceId: 'forged-instance' },
+        })).resolves.toMatchObject({ disposition: 'competing_owner' });
+        await expect(recoverWorkerLostTaskTurnClaim({
+            session, tenantId: 'tenant-a', taskId: 'task-a',
+            expectedClaim: first.result.claim, runtimeOwner: oldOwner,
+        })).resolves.toMatchObject({ disposition: 'recovery_staged' });
+
+        const staged = await session.load('tenant-a', 'task-a');
+        expect(readTaskTurnCoordinator(staged?.snapshot).dispatchIntent).toMatchObject({
+            generation: '1', turnSeq: 1, recovery: { reason: 'worker_lifetime_lost' },
+        });
+        expect(readWorkerLifetimeRecoveryProvenance(staged?.snapshot as Record<string, unknown>)).toEqual([
+            expect.objectContaining({ sourceProviderRunId: 'provider-root-a', sourceFence: '1', turnSeq: 1 }),
+        ]);
+
+        const replacement = await requestTaskTurn({
+            session, tenantId: 'tenant-a', taskId: 'task-a', ownerId: 'worker-b',
+            requestKey: 'task-a:turn-request:1', runtimeSurface: 'hatchet', recoveryGeneration: '1',
+            runtimeOwner: {
+                installationId: 'install-a', instanceId: 'instance-b',
+                workerName: 'worker-instance-b', rootProviderRunId: 'provider-root-b',
+            },
+        });
+        if (replacement.result.disposition !== 'acquired') throw new Error('replacement missing');
+        expect(replacement.result.claim).toMatchObject({ claimedGeneration: '1', turnSeq: 1, fence: '2' });
+        expect(readWorkerLifetimeRecoveryProvenance(replacement.snapshot)).toEqual([
+            expect.objectContaining({
+                sourceProviderRunId: 'provider-root-a', replacementProviderRunId: 'provider-root-b',
+                replacementClaimId: replacement.result.claim.claimId, replacementFence: '2',
+            }),
+        ]);
+    });
     it('persists runtime affinity and rejects claims from another surface', async () => {
         const session = await seededSession();
         const first = await requestTaskTurn({

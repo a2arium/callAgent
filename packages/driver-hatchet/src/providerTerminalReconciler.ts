@@ -2,6 +2,10 @@ import {
     claimTaskTerminalInSnapshot,
     finalizeTaskTurnsForTerminalSnapshot,
     markDurableTaskTerminalEnqueued,
+    readDurableTaskTerminal,
+    readTaskTurnCoordinator,
+    readWorkerLifetimeRecoveryProvenance,
+    defaultMetricsRegistry,
     type SessionManager,
 } from '@a2arium/callagent-core/unstable';
 import type { HatchetClient } from './hatchetClient.js';
@@ -16,6 +20,12 @@ export type ProviderTerminalSignal = {
     source?: 'provider_callback' | 'provider_reconciler';
 };
 
+export type ProviderTerminalConvergenceResult =
+    | 'converged'
+    | 'deferred_active_claim'
+    | 'superseded_by_recovery'
+    | 'already_terminal';
+
 /**
  * The sole SQL-backed path which makes a provider failure authoritative. It is
  * safe from both the worker callback and a later scan: snapshot CAS elects one
@@ -24,9 +34,33 @@ export type ProviderTerminalSignal = {
 export async function convergeProviderTerminal(
     sessions: SessionManager,
     signal: ProviderTerminalSignal,
-): Promise<boolean> {
+): Promise<ProviderTerminalConvergenceResult> {
     const loaded = await sessions.loadForMutation(signal.tenantId, signal.taskId);
-    if (!loaded) return false;
+    if (!loaded) return 'already_terminal';
+    const snapshot = loaded.snapshot as Record<string, unknown>;
+    const existingTerminal = readDurableTaskTerminal(snapshot);
+    if (existingTerminal === undefined && signal.providerRunId) {
+        const recovered = readWorkerLifetimeRecoveryProvenance(snapshot).some(
+            (row) => row.sourceProviderRunId === signal.providerRunId
+        );
+        if (recovered) {
+            defaultMetricsRegistry.increment('provider_terminal_convergence_total', { outcome: 'superseded_by_recovery' });
+            return 'superseded_by_recovery';
+        }
+        try {
+            const coordinator = readTaskTurnCoordinator(snapshot, {
+                tenantId: signal.tenantId,
+                taskId: signal.taskId,
+            });
+            if (coordinator.active?.runtimeSurface === 'hatchet' &&
+                coordinator.active.runtimeOwner?.rootProviderRunId === signal.providerRunId) {
+                defaultMetricsRegistry.increment('provider_terminal_convergence_total', { outcome: 'deferred_active_claim' });
+                return 'deferred_active_claim';
+            }
+        } catch {
+            // Legacy tasks without coordinator state retain the previous provider-terminal behavior.
+        }
+    }
     const error = normalizeProviderError(signal.error);
     const observedAt = signal.observedAt.toISOString();
     const claimed = claimTaskTerminalInSnapshot(loaded.snapshot as Record<string, unknown>, {
@@ -61,12 +95,12 @@ export async function convergeProviderTerminal(
             snapshot: finalizedTurns.snapshot,
         });
         // A concurrent completion/cancellation won. Its snapshot is the truth.
-        if (saved === null) return false;
+        if (saved === null) return 'already_terminal';
     }
 
     const terminal = claimed.terminal;
-    if (terminal.state !== 'failed') return false;
-    if (!claimed.changed && terminal.enqueuedAt !== undefined) return false;
+    if (terminal.state !== 'failed') return 'already_terminal';
+    if (!claimed.changed && terminal.enqueuedAt !== undefined) return 'already_terminal';
     const events = await sessions.listEventsSince({ tenantId: signal.tenantId, sessionId: signal.taskId, sinceSeq: -1 });
     if (!events.some((event) => event.type === 'task.failed' && (event.payload as Record<string, unknown>)?.deliveryKey === terminal.deliveryKey)) {
         await sessions.appendEvent(signal.tenantId, signal.taskId, 'task.failed', {
@@ -109,7 +143,9 @@ export async function convergeProviderTerminal(
             });
         }
     }
-    return claimed.changed;
+    const outcome = claimed.changed ? 'converged' : 'already_terminal';
+    defaultMetricsRegistry.increment('provider_terminal_convergence_total', { outcome });
+    return outcome;
 }
 
 /** Repairs failures that Hatchet recorded after its worker stream became unusable. */
@@ -127,7 +163,7 @@ export class ProviderTerminalReconciler {
     async scanOnce(limit = 100): Promise<number> {
         await this.recordProviderFailures(limit);
         const rows = await this.prisma.driverRun.findMany({
-            where: { operation: 'agent.run', status: 'failed', taskId: { not: null } },
+            where: { operation: { in: ['agent.run', 'agent.run.recovery'] }, status: 'failed', taskId: { not: null } },
             orderBy: [{ updatedAt: 'asc' }, { id: 'asc' }],
             take: limit,
         });
@@ -141,7 +177,7 @@ export class ProviderTerminalReconciler {
                 error: row.error,
                 observedAt: row.updatedAt,
                 source: 'provider_reconciler',
-            })) reconciled += 1;
+            }) === 'converged') reconciled += 1;
         }
         return reconciled;
     }
@@ -152,7 +188,7 @@ export class ProviderTerminalReconciler {
         if (!this.hatchet) return;
         const rows = await this.prisma.driverRun.findMany({
             where: {
-                operation: 'agent.run',
+                operation: { in: ['agent.run', 'agent.run.recovery'] },
                 status: { in: ['queued', 'running'] },
                 providerRunId: { not: null },
                 taskId: { not: null },
@@ -200,7 +236,9 @@ export function normalizeProviderError(error: unknown): { code: string; message:
     const value = error && typeof error === 'object' ? error as Record<string, unknown> : {};
     const message = typeof value.message === 'string' ? value.message : String(error ?? 'Hatchet provider failed');
     return {
-        code: /(?:durable.*(?:unavailable|connection dropped)|stream.*(?:unavailable|closed)|connection.*refused)/i.test(message)
+        code: /worker is not active|worker is not ACTIVE/i.test(message)
+            ? 'HATCHET_WORKER_LIFETIME_LOST'
+            : /(?:durable.*(?:unavailable|connection dropped)|stream.*(?:unavailable|closed)|connection.*refused)/i.test(message)
             ? 'HATCHET_DURABLE_STREAM_UNAVAILABLE'
             : 'HATCHET_PROVIDER_FAILED',
         message: message.slice(0, 500),

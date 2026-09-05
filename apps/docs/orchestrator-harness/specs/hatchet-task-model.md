@@ -238,3 +238,16 @@ projection contract, not necessarily in `driver_runs`.
 
 Use Docker Compose production profile (Postgres + RabbitMQ) for POC gates. Do
 not rely on Hatchet Lite for crash/restart or dashboard-parity validation.
+## Worker-lifetime recovery
+
+The exact Hatchet worker process is part of an active turn's internal ownership
+identity. Loss of that worker is not an agent failure. A trusted worker-lifetime
+abort immediately fences managed mutations and stages the canonical
+`taskId:turn-request:generation` recovery intent through the coordinator snapshot
+CAS. Recovery keeps the generation and logical turn but creates a new claim and
+higher fence on an eligible replacement worker.
+
+The original storage-clock root deadline is the only recovery limit. A deadline
+that expires while the worker recovery intent is unresolved produces
+`HATCHET_WORKER_RECOVERY_DEADLINE_EXCEEDED`. Arbitrary external calls outside
+registered effects cannot be rolled back and must use application idempotency.

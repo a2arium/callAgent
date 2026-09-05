@@ -522,6 +522,48 @@ describe('TaskEngine orchestration coverage', () => {
         }));
     });
 
+    test('root deadline fails an unresolved worker recovery with a stable infrastructure code', async () => {
+        const store = new FakeSessionStore();
+        const engine = new TaskEngine({
+            sessionStore: store as any,
+            handlerInvoker: { invoke: jest.fn() } as any,
+            runtimeDriver: {
+                enqueueStart: jest.fn(async () => undefined), enqueueResume: jest.fn(async () => undefined),
+                enqueueChildDispatch: jest.fn(async () => undefined),
+                scheduleTimer: jest.fn(async () => ({ timerId: 'timer-1' })),
+                cancel: jest.fn(async () => undefined), dispatchOutbox: jest.fn(async () => undefined),
+            } as any,
+        });
+        const sourceClaim = {
+            claimId: 'claim-old', fence: '1', ownerId: 'worker-old', requestKey: 'worker-root:start',
+            claimedGeneration: '1', turnSeq: 1, phase: 'executing', runtimeSurface: 'hatchet',
+            acquiredAt: '1970-01-01T00:00:00.900Z', heartbeatAt: '1970-01-01T00:00:00.950Z',
+            expiresAt: '1970-01-01T00:02:00.000Z',
+        };
+        store.seed('t', 'worker-root', { meta: {
+            agentId: 'agent-a',
+            taskLifecycle: { taskId: 'worker-root', rootTaskId: 'worker-root', ancestorTaskIds: [], state: 'active' },
+            turnCoordinator: {
+                schemaVersion: 1, nextFence: '1', nextTurnSeq: 1,
+                requestedGeneration: '1', completedGeneration: '0', runtimeSurface: 'hatchet',
+                dispatchIntent: {
+                    generation: '1', turnSeq: 1, deliveryKey: 'worker-root:turn-request:1',
+                    runtimeSurface: 'hatchet', createdAt: '1970-01-01T00:00:00.960Z',
+                    recovery: { reason: 'worker_lifetime_lost', sourceClaim, stagedAt: '1970-01-01T00:00:00.960Z' },
+                },
+            },
+        } }, 0n, 'agent-a');
+        let clock = 1_000;
+        const result = await engine.awaitTaskTerminal({
+            tenantId: 't', taskId: 'worker-root', agentId: 'agent-a', timeoutMs: 50,
+            timeoutSource: 'test', startedAtMs: clock, pollIntervalMs: 10,
+            now: () => clock, sleep: async (ms) => { clock += ms; },
+        });
+        expect(result.status).toMatchObject({
+            state: 'failed', metadata: { code: 'HATCHET_WORKER_RECOVERY_DEADLINE_EXCEEDED' },
+        });
+    });
+
     test('awaitTaskTerminal returns input-required without installing a run deadline', async () => {
         const store = new FakeSessionStore();
         const cancel = jest.fn(async () => undefined);
