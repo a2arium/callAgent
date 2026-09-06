@@ -10,6 +10,31 @@ For long-running work, `ctx.progress(...)` remains transient status while
 `await ctx.progress.report?.(...)` stores a bounded, fenced latest-progress view
 for Operator. Report only after the corresponding domain checkpoint commits.
 
+External writes that are not tools should run through the optional registered
+effect boundary from Execution:
+
+```ts
+const result = await ctx.effects?.run(
+  {
+    kind: 'billing.invoice.create',
+    operation: 'invoice.create',
+    idempotencyKey: durableRequest.idempotencyKey,
+  },
+  ({ signal, idempotencyKey }) => billing.createInvoice({
+    ...durableRequest,
+    idempotencyKey,
+    signal,
+  }),
+);
+```
+
+CallAgent checks the current task lifecycle and turn fence before provider
+invocation, supervises the callback as worker-owned work, and aborts its signal
+when turn or worker ownership is lost. The external service must still enforce
+the supplied idempotency key and immutable-request conflict semantics. Agents
+whose correctness requires this boundary should fail closed when `ctx.effects`
+is absent; compatibility runtimes intentionally expose it as optional.
+
 ## Installation
 
 ```bash
