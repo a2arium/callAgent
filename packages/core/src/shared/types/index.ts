@@ -154,6 +154,26 @@ export type TaskContext = {
         readonly idempotencyKey: string;
     };
 
+    /**
+     * Run an agent-owned external mutation behind CallAgent's durable lifecycle,
+     * turn-fence, and worker-lifetime supervision boundary.
+     *
+     * The external system remains the authority for replaying the supplied
+     * idempotency key. CallAgent guarantees that a stale or terminal attempt
+     * cannot begin the callback and aborts an active callback when ownership is
+     * lost.
+     */
+    effects?: {
+        run: <T>(
+            input: {
+                kind: string;
+                idempotencyKey: string;
+                operation?: string;
+            },
+            execute: (control: { readonly signal: AbortSignal; readonly idempotencyKey: string }) => Promise<T>
+        ) => Promise<T>;
+    };
+
     // Use the ILLMCaller interface for llm, allow optional state (de)serialization
     llm: ILLMCaller & { exportState?: () => unknown; importState?: (state: unknown) => void };
 

@@ -930,6 +930,57 @@ export class ApiBinder {
         const flushMentalState = params.flushMentalState;
         const conversationService = this.deps.conversationService;
 
+        if (this.deps.runOwnedEffect) {
+            ctx.effects = {
+                run: async <T>(
+                    input: { kind: string; idempotencyKey: string; operation?: string },
+                    execute: (control: { readonly signal: AbortSignal; readonly idempotencyKey: string }) => Promise<T>
+                ): Promise<T> => {
+                    const kind = input.kind.trim();
+                    const idempotencyKey = input.idempotencyKey.trim();
+                    if (!/^[a-z][a-z0-9._-]{0,95}$/i.test(kind)) {
+                        throw Object.assign(new Error('Registered effect kind is invalid'), {
+                            code: 'TASK_EFFECT_KIND_INVALID',
+                        });
+                    }
+                    if (idempotencyKey.length < 1 || idempotencyKey.length > 512 || /[\r\n\0]/.test(idempotencyKey)) {
+                        throw Object.assign(new Error('Registered effect idempotency key is invalid'), {
+                            code: 'TASK_EFFECT_IDEMPOTENCY_KEY_INVALID',
+                        });
+                    }
+                    const operation = input.operation?.trim() || `${kind}.run`;
+                    if (operation.length > 128 || /[\r\n\0]/.test(operation)) {
+                        throw Object.assign(new Error('Registered effect operation is invalid'), {
+                            code: 'TASK_EFFECT_OPERATION_INVALID',
+                        });
+                    }
+                    const effectKind = `agent.external.${kind}`;
+                    const registration = await registerTaskEffect({
+                        session: this.deps.sessionManager,
+                        tenantId,
+                        taskId: sessionId,
+                        agentId,
+                        effectKind,
+                        operation: `external.${operation}.register`,
+                        mutate: ({ snapshot }) => ({ snapshot, value: undefined }),
+                    });
+                    return this.deps.runOwnedEffect!(
+                        ({ signal }) => execute({ signal, idempotencyKey }),
+                        {
+                            kind: effectKind,
+                            label: `external effect ${kind}`,
+                            tenantId,
+                            taskId: sessionId,
+                            agentId,
+                            source: 'ApiBinder.effects.run',
+                            rootTaskId: registration.lifecycle.rootTaskId,
+                            ancestorTaskIds: registration.lifecycle.ancestorTaskIds,
+                        }
+                    );
+                },
+            };
+        }
+
         const allowRootTargets = PluginManager.findAgent(agentId)?.resolved.runtimeManifest
             .orchestration?.rootTaskSubmission?.allowAgents ?? [];
         if (allowRootTargets.length > 0) {
