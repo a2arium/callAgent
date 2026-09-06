@@ -69,7 +69,7 @@ describe('DriverRunsRepository', () => {
             where: {
                 tenantId: 'tenant-1',
                 taskId: 'task-1',
-                operation: { in: ['agent.run', 'task.start'] },
+                operation: { in: ['agent.run', 'agent.run.recovery', 'task.start'] },
             },
             data: expect.objectContaining({
                 status: 'completed',
@@ -100,7 +100,7 @@ describe('DriverRunsRepository', () => {
         expect(call.where).toEqual({
             tenantId: 'tenant-1',
             taskId: 'root-task',
-            operation: { in: ['agent.run', 'task.start'] },
+            operation: { in: ['agent.run', 'agent.run.recovery', 'task.start'] },
         });
         expect(call.where).not.toHaveProperty('rootTaskId');
         expect(call.where).not.toHaveProperty('OR');
