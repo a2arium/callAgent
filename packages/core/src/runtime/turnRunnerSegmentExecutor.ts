@@ -244,7 +244,9 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
                     taskId,
                     agentId,
                     idempotencyKey,
-                claim: admission.result.claim,
+                    claim: admission.result.claim,
+                    runtimeOwner: params.runtimeOwner,
+                    executionSignal: executionAbort.controller.signal,
                 });
                 if (disposition === undefined) {
                     await this.appendAttemptEvent('turn.attempt_finished', {

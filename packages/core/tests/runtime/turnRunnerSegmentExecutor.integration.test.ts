@@ -294,6 +294,90 @@ describe('TurnRunnerSegmentExecutor integration', () => {
         });
     });
 
+    it('stages durable recovery from a prepared invocation when its Hatchet worker lifetime is lost', async () => {
+        const preparedTaskId = `${taskId}-prepared-worker-loss`;
+        const runtimeAbort = new AbortController();
+        const preparedContext = {
+            task: { id: preparedTaskId, input: {} },
+            logger: console,
+            progress: jest.fn(),
+            fail: jest.fn(),
+        } as unknown as TaskContext;
+        executeTurnSpy.mockImplementation(async (params) => {
+            runtimeAbort.abort(new HatchetWorkerLifetimeLostError('prepared worker inactive'));
+            throw params.ctx.abortSignal?.reason;
+        });
+
+        const result = await executor.runSegment({
+            tenantId,
+            taskId: preparedTaskId,
+            agentId,
+            idempotencyKey: `${preparedTaskId}:start`,
+            runtimeSurface: 'hatchet',
+            abortSignal: runtimeAbort.signal,
+            runtimeOwner: {
+                installationId: 'install-a', instanceId: 'instance-a',
+                workerName: 'worker-a', rootProviderRunId: 'provider-root-a',
+            },
+            wake: { trigger: 'start', input: {} },
+            prepared: {
+                ctx: preparedContext,
+                turnParams: {
+                    tenantId,
+                    sessionId: preparedTaskId,
+                    trigger: 'start',
+                    isStreaming: false,
+                    input: {},
+                },
+            },
+        });
+
+        expect(result.turnDisposition).toBe('worker_lifetime_lost_recovery_staged');
+        expect(result.taskStatus).not.toBe('failed');
+        const stored = await sessionManager.load(tenantId, preparedTaskId);
+        expect(readTaskTurnCoordinator(stored?.snapshot).dispatchIntent).toMatchObject({
+            generation: '1', turnSeq: 1, recovery: { reason: 'worker_lifetime_lost' },
+        });
+        const events = await sessionManager.listEventsSince({
+            tenantId, sessionId: preparedTaskId, sinceSeq: 0,
+        });
+        expect(events.some((event) => event.type === 'task.failed')).toBe(false);
+
+        executeTurnSpy.mockImplementation(async (params) => persistMockTurn(params, {
+            M: initialM(params.ctx),
+            outcome: { kind: 'complete', result: { recovered: true } },
+            metrics: {},
+            taskStatus: {
+                state: 'completed', timestamp: new Date().toISOString(),
+                metadata: { result: { recovered: true } },
+            },
+        }));
+        const replacementExecutor = new TurnRunnerSegmentExecutor({
+            turnRunner,
+            sessionManager,
+            createContext: (task) => ({
+                task, logger: console, progress: jest.fn(), fail: jest.fn(),
+            }) as TaskContext,
+            dedupe: createInMemorySegmentDedupe(),
+        });
+        const recovered = await replacementExecutor.runSegment({
+            tenantId,
+            taskId: preparedTaskId,
+            agentId,
+            idempotencyKey: `${preparedTaskId}:turn-request:1`,
+            recoveryGeneration: '1',
+            runtimeSurface: 'hatchet',
+            runtimeOwner: {
+                installationId: 'install-a', instanceId: 'instance-b',
+                workerName: 'worker-b', rootProviderRunId: 'provider-root-b',
+            },
+            wake: { trigger: 'start', input: {} },
+        });
+        expect(recovered.turnClaim).toMatchObject({
+            claimedGeneration: '1', turnSeq: 1, fence: '2',
+        });
+    });
+
     it('enforces the admitted root deadline before acquiring the initial turn', async () => {
         const ensureInitialRootDeadline = jest.fn(async () => 'canceled' as const);
         const guardedExecutor = new TurnRunnerSegmentExecutor({

@@ -27,6 +27,9 @@ export async function startWorkerHealthMonitor(params: {
     const initialRegistrationGraceMs = params.initialRegistrationGraceMs ?? 30_000;
     let stopped = false;
     let readyOnce = false;
+    let consecutiveEligibleFailures = 0;
+    let shutdownNotified = false;
+    let lastPersistedState: 'ready' | 'failed' | 'stopped' | undefined;
     const persist = async (state: 'ready' | 'failed' | 'stopped', error?: unknown, heartbeatAt?: Date) => {
         const now = new Date();
         const healthy = state === 'ready';
@@ -36,15 +39,18 @@ export async function startWorkerHealthMonitor(params: {
             create: { tenantId, installationId, instanceId, workerName: params.workerName, state, workflowHash, observedAt: now, heartbeatAt: healthy ? heartbeatAt ?? now : null, leaseUntil: new Date(healthy ? now.getTime() + leaseMs : now.getTime()), ...(message ? { errorCode: 'HATCHET_WORKER_STREAM_UNAVAILABLE', errorMessage: message.slice(0, 500) } : {}) },
             update: { state, workflowHash, observedAt: now, heartbeatAt: healthy ? heartbeatAt ?? now : null, leaseUntil: new Date(healthy ? now.getTime() + leaseMs : now.getTime()), errorCode: healthy ? null : state === 'stopped' ? null : 'HATCHET_WORKER_STREAM_UNAVAILABLE', errorMessage: healthy || state === 'stopped' ? null : message?.slice(0, 500) },
         });
+        lastPersistedState = state;
     };
     const unavailable = async (error: Error) => {
         await persist('failed', error);
         // Hatchet's SDK readiness handshake can complete before the worker is
         // visible as ACTIVE through the REST API. Keep readiness degraded, but
         // do not kill a healthy process during that bounded registration race.
-        if (readyOnce || Date.now() - startedAt >= initialRegistrationGraceMs) {
-            params.onStreamUnavailable?.(error);
-        }
+        if (!readyOnce && Date.now() - startedAt < initialRegistrationGraceMs) return;
+        consecutiveEligibleFailures += 1;
+        if (consecutiveEligibleFailures < 2 || shutdownNotified) return;
+        shutdownNotified = true;
+        params.onStreamUnavailable?.(error);
     };
     const probe = async () => {
         try {
@@ -79,6 +85,7 @@ export async function startWorkerHealthMonitor(params: {
                 return;
             }
             readyOnce = true;
+            consecutiveEligibleFailures = 0;
             await persist('ready', undefined, heartbeatAt);
             params.onHealthy?.(heartbeatAt);
         } catch (error) {
@@ -88,5 +95,15 @@ export async function startWorkerHealthMonitor(params: {
     await probe();
     const timer = setInterval(() => { if (!stopped) void probe(); }, params.intervalMs ?? 10_000);
     timer.unref?.();
-    return { instanceId, workerName: params.workerName, stop: async () => { stopped = true; clearInterval(timer); await persist('stopped'); } };
+    return {
+        instanceId,
+        workerName: params.workerName,
+        stop: async () => {
+            stopped = true;
+            clearInterval(timer);
+            // Preserve the diagnostic that triggered supervised shutdown. A
+            // normal graceful stop still records the instance as stopped.
+            if (lastPersistedState !== 'failed') await persist('stopped');
+        },
+    };
 }
