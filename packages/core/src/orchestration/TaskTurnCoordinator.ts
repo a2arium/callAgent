@@ -18,7 +18,7 @@ const DEFAULT_TAKEOVER_GRACE_MS = 10_000;
 const log = logger.createLogger({ prefix: 'TaskTurnCoordinator' });
 
 export type TaskTurnRuntimeSurface = 'direct' | 'in_process' | 'hatchet';
-export type TaskTurnRecoveryReason = 'lease_expired' | 'worker_lifetime_lost';
+export type TaskTurnRecoveryReason = 'lease_expired' | 'worker_lifetime_lost' | 'segment_yield';
 
 export type TaskTurnRuntimeOwner = {
     installationId: string;
@@ -138,7 +138,7 @@ export function readTaskTurnRecoveryProvenance(snapshot: Record<string, unknown>
     const rows = Array.isArray(meta?.turnRecoveries) ? meta.turnRecoveries : [];
     const current = rows.flatMap((value) => {
         const row = asRecord(value);
-        if (!row || (row.reason !== 'lease_expired' && row.reason !== 'worker_lifetime_lost') ||
+        if (!row || !['lease_expired', 'worker_lifetime_lost', 'segment_yield'].includes(String(row.reason)) ||
             typeof row.deliveryKey !== 'string' || typeof row.generation !== 'string' ||
             !Number.isSafeInteger(row.turnSeq) || typeof row.stagedAt !== 'string') return [];
         let sourceClaim: ActiveTaskTurnClaim;
@@ -555,19 +555,20 @@ function readState(
             ? undefined
             : (() => {
                   const rawRecovery = asRecord(candidate.recovery);
-                  if (rawRecovery?.reason !== 'lease_expired' && rawRecovery?.reason !== 'worker_lifetime_lost') {
+                  if (!['lease_expired', 'worker_lifetime_lost', 'segment_yield'].includes(String(rawRecovery?.reason))) {
                       return invalid(tenantId, taskId, 'dispatchIntent recovery reason is invalid');
                   }
+                  const validRecovery = rawRecovery!;
                   return {
-                      reason: rawRecovery.reason as TaskTurnRecoveryReason,
-                      sourceClaim: readRecoverySourceClaim(rawRecovery.sourceClaim, {
+                      reason: validRecovery.reason as TaskTurnRecoveryReason,
+                      sourceClaim: readRecoverySourceClaim(validRecovery.sourceClaim, {
                           nextFence,
                           requested,
                           completed,
                           nextTurnSeq: value.nextTurnSeq as number,
                       }, tenantId, taskId),
-                      ...(rawRecovery.stagedAt !== undefined
-                          ? { stagedAt: timestamp(rawRecovery.stagedAt, 'dispatchIntent.recovery.stagedAt', tenantId, taskId) }
+                      ...(validRecovery.stagedAt !== undefined
+                          ? { stagedAt: timestamp(validRecovery.stagedAt, 'dispatchIntent.recovery.stagedAt', tenantId, taskId) }
                           : {}),
                   };
               })();
@@ -818,6 +819,82 @@ export async function recoverWorkerLostTaskTurnClaim(params: {
         runtimeSurface: 'hatchet',
     });
     return reconciled.value;
+}
+
+/**
+ * Voluntarily closes one provider segment while preserving the same logical
+ * turn generation and turnSeq for the replacement segment.
+ */
+export function yieldTaskTurnClaimInSnapshot(
+    snapshot: Record<string, unknown>,
+    params: {
+        tenantId: string;
+        taskId: string;
+        expectedClaim: TaskTurnClaim;
+        storageNow: string;
+    }
+): {
+    snapshot: Record<string, unknown>;
+    disposition: 'recovery_staged' | 'already_recovering' | 'competing_owner' | 'terminal' | 'settled';
+    recoveryHint?: TaskTurnRecoveryHint;
+} {
+    if (isTaskLifecycleTerminal(readTaskLifecycle(snapshot, params.taskId))) {
+        return { snapshot, disposition: 'terminal' };
+    }
+    const state = readState(snapshot, params.tenantId, params.taskId);
+    const expected = params.expectedClaim;
+    const recovering = state.dispatchIntent?.recovery;
+    if (recovering?.reason === 'segment_yield' &&
+        recovering.sourceClaim.claimId === expected.claimId &&
+        recovering.sourceClaim.fence === expected.fence) {
+        return {
+            snapshot,
+            disposition: 'already_recovering',
+            recoveryHint: {
+                reason: 'segment_yield',
+                generation: state.dispatchIntent!.generation,
+                deliveryKey: state.dispatchIntent!.deliveryKey,
+                turnSeq: state.dispatchIntent!.turnSeq!,
+            },
+        };
+    }
+    if (BigInt(state.completedGeneration) >= BigInt(expected.claimedGeneration)) {
+        return { snapshot, disposition: 'settled' };
+    }
+    const active = state.active;
+    if (active?.claimId !== expected.claimId || active.fence !== expected.fence ||
+        active.claimedGeneration !== expected.claimedGeneration) {
+        return { snapshot, disposition: 'competing_owner' };
+    }
+    const deliveryKey = `${params.taskId}:turn-request:${active.claimedGeneration}`;
+    const dispatchIntent: NonNullable<TaskTurnCoordinatorState['dispatchIntent']> = {
+        generation: active.claimedGeneration,
+        turnSeq: active.turnSeq,
+        deliveryKey,
+        runtimeSurface: active.runtimeSurface,
+        createdAt: params.storageNow,
+        recovery: {
+            reason: 'segment_yield',
+            sourceClaim: active,
+            stagedAt: params.storageNow,
+        },
+    };
+    return {
+        snapshot: appendTaskTurnRecoveryProvenance(
+            writeState(snapshot, { ...state, active: undefined, dispatchIntent }),
+            'segment_yield',
+            active,
+            params.storageNow,
+            deliveryKey,
+        ),
+        disposition: 'recovery_staged',
+        recoveryHint: {
+            reason: 'segment_yield',
+            generation: active.claimedGeneration,
+            deliveryKey,
+            turnSeq: active.turnSeq,
+        },
+    };
 }
 
 export async function recoverExpiredTaskTurnClaim(params: {

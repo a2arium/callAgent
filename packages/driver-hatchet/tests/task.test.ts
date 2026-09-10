@@ -53,6 +53,56 @@ function createMemorySessions(initial: Record<string, Record<string, unknown>>) 
 }
 
 describe('executeTaskTask', () => {
+    it('automatically continues across repeated bounded provider segments in the same logical turn', async () => {
+        let ordinal = 0;
+        const runChild = jest.fn(async (_name: string, childInput: any) => {
+            ordinal += 1;
+            if (ordinal <= 3) {
+                return {
+                    tenantId: 'tenant-1', taskId: 'task-segmented', agentId: 'agent-1',
+                    boundary: { kind: 'paused', reason: 'budget_or_latency' },
+                    taskStatus: 'working',
+                    turnDisposition: 'segment_yield_recovery_staged',
+                    claimedGeneration: '1',
+                    turnSeq: 1,
+                    recoveryHint: {
+                        reason: 'segment_yield',
+                        generation: '1',
+                        deliveryKey: 'task-segmented:turn-request:1',
+                        turnSeq: 1,
+                    },
+                };
+            }
+            return {
+                tenantId: 'tenant-1', taskId: 'task-segmented', agentId: 'agent-1',
+                boundary: { kind: 'complete', result: { ok: true } },
+                taskStatus: 'completed',
+                turnDisposition: 'executed',
+                claimedGeneration: '1',
+                turnSeq: 1,
+            };
+        });
+
+        const result = await executeTaskTask({
+            tenantId: 'tenant-1',
+            taskId: 'task-segmented',
+            agentId: 'agent-1',
+            input: { text: 'ingest' },
+            idempotencyKey: 'task-segmented:start',
+        }, { runChild } as never);
+
+        expect(result.boundary).toEqual({ kind: 'complete', result: { ok: true } });
+        expect(runChild).toHaveBeenCalledTimes(4);
+        const childInputs = runChild.mock.calls.map((call) => call[1] as any);
+        expect(childInputs.slice(1)).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+                recoveryGeneration: '1',
+                idempotencyKey: 'task-segmented:turn-request:1',
+            }),
+        ]));
+        expect(childInputs.every((child) => child.taskId === 'task-segmented')).toBe(true);
+    });
+
     it('derives Hatchet execution timeout from latency budget plus grace', () => {
         expect(resolveHatchetExecutionTimeout({ latencyMs: 300_000 })).toBe('6m');
         expect(resolveHatchetExecutionTimeout({ latencyMs: 600_000 })).toBe('11m');

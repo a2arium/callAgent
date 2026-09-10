@@ -92,7 +92,7 @@ export type TaskCoordinationView = {
     dispatchIntent?: {
         generation: string;
         state: 'pending' | 'enqueued' | 'overdue';
-        recoveryReason?: 'lease_expired' | 'worker_lifetime_lost';
+        recoveryReason?: 'lease_expired' | 'worker_lifetime_lost' | 'segment_yield';
         createdAt: string;
         enqueuedAt?: string;
     };
@@ -200,12 +200,12 @@ export type TurnAttemptRun = {
     startedAt?: string;
     finishedAt?: string;
     error?: unknown;
-    supersededReason?: 'lease_expired' | 'worker_lifetime_lost' | 'replaced';
+    supersededReason?: 'lease_expired' | 'worker_lifetime_lost' | 'segment_yield' | 'replaced';
 };
 
 export type TurnRecoveryRun = {
     id: string;
-    reason: 'lease_expired' | 'worker_lifetime_lost';
+    reason: 'lease_expired' | 'worker_lifetime_lost' | 'segment_yield';
     state: 'staged' | 'consumed';
     generation: string;
     turnSeq: number;

@@ -267,8 +267,10 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
             } finally {
                 executionAbort.dispose();
             }
-            const persistedDisposition = (taskEntity as { __turnPersistence?: { disposition?: string } })
-                .__turnPersistence?.disposition;
+            const turnPersistence = (taskEntity as {
+                __turnPersistence?: { disposition?: string; recoveryHint?: import('../orchestration/TaskTurnCoordinator.js').TaskTurnRecoveryHint };
+            }).__turnPersistence;
+            const persistedDisposition = turnPersistence?.disposition;
             if (persistedDisposition === 'superseded' || persistedDisposition === 'competing_terminal') {
                 const disposition = await this.classifySupersededExecutionError({
                     error: new TaskTurnOwnershipLostError('missing', admission.result.claim),
@@ -317,8 +319,13 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
                     telemetry?.traceId ??
                     (prepared.ctx as { telemetry?: { traceId?: string } }).telemetry?.traceId,
                 taskEntity,
-                turnDisposition: 'executed',
+                turnDisposition: turnPersistence?.recoveryHint?.reason === 'segment_yield'
+                    ? 'segment_yield_recovery_staged'
+                    : 'executed',
                 turnClaim: admission.result.claim,
+                ...(turnPersistence?.recoveryHint !== undefined
+                    ? { recoveryHint: turnPersistence.recoveryHint }
+                    : {}),
                 ...this.postCommitResultFields(taskEntity as unknown as {
                     __turnPersistence?: { postCommitWork?: () => Promise<void> };
                 }),
@@ -483,8 +490,10 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
             executionAbort.dispose();
         }
 
-        const persistedDisposition = (taskEntity as { __turnPersistence?: { disposition?: string } })
-            .__turnPersistence?.disposition;
+        const turnPersistence = (taskEntity as {
+            __turnPersistence?: { disposition?: string; recoveryHint?: import('../orchestration/TaskTurnCoordinator.js').TaskTurnRecoveryHint };
+        }).__turnPersistence;
+        const persistedDisposition = turnPersistence?.disposition;
         if (persistedDisposition === 'superseded' || persistedDisposition === 'competing_terminal') {
             const disposition = await this.classifySupersededExecutionError({
                 error: new TaskTurnOwnershipLostError('missing', admission.result.claim),
@@ -532,8 +541,13 @@ export class TurnRunnerSegmentExecutor implements TurnExecutor {
             boundary,
             taskStatus,
             traceId: telemetry?.traceId ?? (ctx as { telemetry?: { traceId?: string } }).telemetry?.traceId,
-            turnDisposition: 'executed',
+            turnDisposition: turnPersistence?.recoveryHint?.reason === 'segment_yield'
+                ? 'segment_yield_recovery_staged'
+                : 'executed',
             turnClaim: admission.result.claim,
+            ...(turnPersistence?.recoveryHint !== undefined
+                ? { recoveryHint: turnPersistence.recoveryHint }
+                : {}),
             ...this.postCommitResultFields(taskEntity as unknown as {
                 __turnPersistence?: { postCommitWork?: () => Promise<void> };
             }),

@@ -26,7 +26,9 @@ import {
     assertCurrentTaskTurn,
     completeTaskTurnInSnapshot,
     setTaskTurnPhaseInSnapshot,
+    yieldTaskTurnClaimInSnapshot,
 } from './TaskTurnCoordinator.js';
+import type { TaskTurnRecoveryHint } from './TaskTurnCoordinator.js';
 import {
     isArtifactPersistenceError,
     prepareChildResultForPersistence,
@@ -108,6 +110,7 @@ export type TurnPersistenceResult = {
     wmVersion: bigint;
     terminal?: DurableTaskTerminal;
     scheduleNext: boolean;
+    recoveryHint?: TaskTurnRecoveryHint;
     /** Best-effort normalization that runs only after the authoritative attempt is closed. */
     postCommitWork?: () => Promise<void>;
 };
@@ -935,24 +938,49 @@ export class TaskExecutor {
                     next = addProcessedSegmentKey(next, activeIdempotencyKey);
                 }
                 let scheduleNext = false;
+                let recoveryHint: TaskTurnRecoveryHint | undefined;
                 if (activeTurnClaim !== undefined && params.finalizeTurnClaim === true) {
-                    const finalized = completeTaskTurnInSnapshot(next, {
-                        tenantId,
-                        taskId: sessionId,
-                        claim: activeTurnClaim,
-                        storageNow,
-                    });
-                    if (finalized.disposition === 'superseded') {
-                        throw new TaskTurnSupersededError({
+                    const isProviderSegmentYield = outcome.kind === 'continue' &&
+                        (loopOpts.segmentMaxTurns !== undefined || loopOpts.segmentLatencyMs !== undefined);
+                    if (isProviderSegmentYield) {
+                        const yielded = yieldTaskTurnClaimInSnapshot(next, {
                             tenantId,
                             taskId: sessionId,
-                            claimId: activeTurnClaim.claimId,
-                            fence: activeTurnClaim.fence,
-                            operation: 'turn.persist.finalize',
+                            expectedClaim: activeTurnClaim,
+                            storageNow,
                         });
+                        if (yielded.disposition === 'competing_owner' || yielded.disposition === 'settled') {
+                            throw new TaskTurnSupersededError({
+                                tenantId,
+                                taskId: sessionId,
+                                claimId: activeTurnClaim.claimId,
+                                fence: activeTurnClaim.fence,
+                                operation: 'turn.persist.segment_yield',
+                            });
+                        }
+                        next = yielded.snapshot;
+                        recoveryHint = yielded.recoveryHint;
+                        scheduleNext = yielded.disposition === 'recovery_staged' ||
+                            yielded.disposition === 'already_recovering';
+                    } else {
+                        const finalized = completeTaskTurnInSnapshot(next, {
+                            tenantId,
+                            taskId: sessionId,
+                            claim: activeTurnClaim,
+                            storageNow,
+                        });
+                        if (finalized.disposition === 'superseded') {
+                            throw new TaskTurnSupersededError({
+                                tenantId,
+                                taskId: sessionId,
+                                claimId: activeTurnClaim.claimId,
+                                fence: activeTurnClaim.fence,
+                                operation: 'turn.persist.finalize',
+                            });
+                        }
+                        next = finalized.snapshot;
+                        scheduleNext = finalized.scheduleNext;
                     }
-                    next = finalized.snapshot;
-                    scheduleNext = finalized.scheduleNext;
                 }
 
                 const terminalDisposition: TurnPersistenceResult['disposition'] =
@@ -964,6 +992,7 @@ export class TaskExecutor {
                         disposition: terminalDisposition,
                         ...(terminalClaim ? { terminal: terminalClaim.terminal } : {}),
                         scheduleNext,
+                        ...(recoveryHint !== undefined ? { recoveryHint } : {}),
                     },
                 };
             },

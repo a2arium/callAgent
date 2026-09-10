@@ -371,6 +371,21 @@ async function executeTaskTaskInner(
                 await waitForTurnAvailability(ctx, input, attemptOrdinal, segment.turnAvailableAt, 0);
                 continue;
             }
+            if (segment.turnDisposition === 'segment_yield_recovery_staged') {
+                const hint = segment.recoveryHint;
+                if (hint?.reason !== 'segment_yield') {
+                    throw new Error('TASK_TURN_PROTOCOL_STATE_UNKNOWN: segment yield omitted recovery hint');
+                }
+                recoveryGeneration = hint.generation;
+                idempotencyKey = hint.deliveryKey;
+                queuedFallbackCount = 0;
+                // The previous child durably staged this continuation before it
+                // returned. Claim it immediately under the same logical turn.
+                // recoveryGeneration skips wake application; use the original
+                // start shape only as a valid transport envelope.
+                wake = { trigger: 'start', input: input.input };
+                continue;
+            }
             recoveryGeneration = undefined;
             queuedFallbackCount = 0;
 

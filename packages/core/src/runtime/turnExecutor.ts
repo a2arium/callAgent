@@ -97,7 +97,8 @@ export type SegmentResult = {
     turnTraceId?: string;
     /** Internal ownership outcome used by durable runtime drivers. */
     turnDisposition?: 'executed' | 'queued' | 'matching_replay' | 'superseded' |
-        'terminal_replay' | 'lease_expired_recovery_staged' | 'worker_lifetime_lost_recovery_staged';
+        'terminal_replay' | 'lease_expired_recovery_staged' | 'worker_lifetime_lost_recovery_staged' |
+        'segment_yield_recovery_staged';
     /** Claim used by this attempt; retained only for bounded driver diagnostics. */
     turnClaim?: { claimId: string; fence: string; claimedGeneration: string; turnSeq: number };
     /** Logical turn this attempt executed, replayed, or was queued behind. */

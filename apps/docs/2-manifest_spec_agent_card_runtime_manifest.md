@@ -412,7 +412,9 @@ The exact behavioral meaning of runtime fields such as `budgets`, `hitl`, `cache
 `segmentMaxTurns` and `segmentLatencyMs` are non-terminal provider boundaries. When
 either is configured, an agent may return `{ kind: 'continue', observations: [] }`
 after committing domain progress; CallAgent persists the latest snapshot and pauses
-the provider segment at the configured boundary. Without a segment boundary,
+the provider segment at the configured boundary. Durable runtimes automatically
+continue under the same task generation and logical turn with a new fenced claim;
+the root deadline is unchanged. Without a segment boundary,
 observation-free `continue` remains invalid to prevent an unbounded busy loop.
 
 ### Manifest consent enforcement

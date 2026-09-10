@@ -13,6 +13,7 @@ import {
     recoverWorkerLostTaskTurnClaim,
     readWorkerLifetimeRecoveryProvenance,
     readTaskTurnRecoveryProvenance,
+    yieldTaskTurnClaimInSnapshot,
 } from '../src/orchestration/TaskTurnCoordinator.js';
 import { registerTaskEffect } from '../src/orchestration/TaskEffectRegistration.js';
 import { runWithSegmentIdempotencyKey } from '../src/runtime/segmentProcessedKeys.js';
@@ -47,6 +48,48 @@ async function seededSession() {
 }
 
 describe('TaskTurnCoordinator', () => {
+    it('voluntarily yields and reacquires the same logical turn with a higher fence', async () => {
+        const session = await seededSession();
+        const first = await requestTaskTurn({
+            session, tenantId: 'tenant-a', taskId: 'task-a', ownerId: 'worker-a',
+            requestKey: 'task-a:start', runtimeSurface: 'hatchet',
+        });
+        if (first.result.disposition !== 'acquired') throw new Error('claim missing');
+
+        const yielded = yieldTaskTurnClaimInSnapshot(first.snapshot, {
+            tenantId: 'tenant-a', taskId: 'task-a', expectedClaim: first.result.claim,
+            storageNow: '2026-09-10T12:00:00.000Z',
+        });
+        expect(yielded).toMatchObject({
+            disposition: 'recovery_staged',
+            recoveryHint: {
+                reason: 'segment_yield', generation: '1', turnSeq: 1,
+                deliveryKey: 'task-a:turn-request:1',
+            },
+        });
+        expect(readTaskTurnCoordinator(yielded.snapshot)).toMatchObject({
+            requestedGeneration: '1', completedGeneration: '0', nextTurnSeq: 1,
+            dispatchIntent: { generation: '1', turnSeq: 1, recovery: { reason: 'segment_yield' } },
+        });
+
+        const current = await session.load('tenant-a', 'task-a');
+        await session.saveSnapshot({
+            tenantId: 'tenant-a', sessionId: 'task-a', agentId: 'agent-a',
+            expectedWmVersion: current!.wmVersion, snapshot: yielded.snapshot,
+        });
+        const replacement = await requestTaskTurn({
+            session, tenantId: 'tenant-a', taskId: 'task-a', ownerId: 'worker-b',
+            requestKey: 'task-a:turn-request:1', runtimeSurface: 'hatchet', recoveryGeneration: '1',
+        });
+        if (replacement.result.disposition !== 'acquired') throw new Error('replacement missing');
+        expect(replacement.result.claim).toMatchObject({
+            claimedGeneration: '1', turnSeq: 1, fence: '2',
+        });
+        expect(readTaskTurnCoordinator(replacement.snapshot)).toMatchObject({
+            requestedGeneration: '1', completedGeneration: '0', nextTurnSeq: 1,
+        });
+    });
+
     it('immediately recovers the exact lost Hatchet worker without waiting for lease expiry', async () => {
         const session = await seededSession();
         const oldOwner = {

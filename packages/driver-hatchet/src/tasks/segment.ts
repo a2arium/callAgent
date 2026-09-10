@@ -93,14 +93,15 @@ export type SegmentTaskOutput = JsonObject & {
     turnTraceId?: string;
     executionMetadata?: { origin?: 'cache' | 'runtime' };
     turnDisposition?: 'executed' | 'queued' | 'matching_replay' | 'superseded' |
-        'terminal_replay' | 'lease_expired_recovery_staged' | 'worker_lifetime_lost_recovery_staged';
+        'terminal_replay' | 'lease_expired_recovery_staged' | 'worker_lifetime_lost_recovery_staged' |
+        'segment_yield_recovery_staged';
     claimId?: string;
     turnFence?: string;
     claimedGeneration?: string;
     turnSeq?: number;
     associatedTurnSeq?: number;
     recoveryHint?: {
-        reason: 'lease_expired' | 'worker_lifetime_lost';
+        reason: 'lease_expired' | 'worker_lifetime_lost' | 'segment_yield';
         generation: string;
         deliveryKey: string;
         turnSeq: number;
