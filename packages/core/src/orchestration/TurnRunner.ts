@@ -454,10 +454,25 @@ export class TurnRunner {
                           }
                         : undefined;
 
-                if (persistedBudgets && typeof persistedBudgets.maxTurns === 'number') {
-                    loopOpts = persistedBudgets;
+                if (persistedBudgets) {
+                    // Root task budgets are immutable once admitted, while newly
+                    // introduced provider-segment bounds may safely be adopted by
+                    // an already-running task after a compatible runtime upgrade.
+                    loopOpts = {
+                        ...manifestBudgets,
+                        ...persistedBudgets,
+                        segmentMaxTurns:
+                            persistedBudgets.segmentMaxTurns ?? manifestBudgets?.segmentMaxTurns,
+                        segmentLatencyMs:
+                            persistedBudgets.segmentLatencyMs ?? manifestBudgets?.segmentLatencyMs,
+                    };
                 } else if (manifestBudgets && typeof manifestBudgets === 'object') {
-                    loopOpts = { maxTurns: manifestBudgets.maxTurns, latencyMs: manifestBudgets.latencyMs };
+                    loopOpts = {
+                        maxTurns: manifestBudgets.maxTurns,
+                        latencyMs: manifestBudgets.latencyMs,
+                        segmentMaxTurns: manifestBudgets.segmentMaxTurns,
+                        segmentLatencyMs: manifestBudgets.segmentLatencyMs,
+                    };
                 } else {
                     log.warn('No budgets found in manifest or state for agent, using default 50 turns. Ensure agent.json is present and correctly matched if this is unexpected.', { agentId, sessionId });
                     loopOpts = { maxTurns: 50 };

@@ -41,6 +41,10 @@ export const AgentRuntimeManifestSchema = z.object({
   budgets: z.object({
     maxTurns: z.number().int().positive().optional(),
     latencyMs: z.number().int().positive().optional(),
+    /** Maximum cognition iterations executed by one durable provider segment. */
+    segmentMaxTurns: z.number().int().positive().optional(),
+    /** Maximum wall time spent between completed cognition iterations in one segment. */
+    segmentLatencyMs: z.number().int().positive().optional(),
     maxConcurrentEffects: z.number().int().positive().optional(),
   }).strict().optional(),
 

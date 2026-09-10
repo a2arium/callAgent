@@ -73,6 +73,8 @@ export type LoopOutcome = TurnOutcome;
 export type LoopOpts = {
     maxTurns?: number;
     latencyMs?: number;
+    segmentMaxTurns?: number;
+    segmentLatencyMs?: number;
     manifestProvenance?: ManifestProvenance;
     collectTraces?: boolean;
     autoJoinInvitedTopics?: boolean;

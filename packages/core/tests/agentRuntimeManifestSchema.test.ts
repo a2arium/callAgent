@@ -40,12 +40,24 @@ describe('AgentRuntimeManifestSchema', () => {
             runMode: 'loop',
             budgets: {
                 maxTurns: 10,
-                latencyMs: 5000
+                latencyMs: 5000,
+                segmentMaxTurns: 4,
+                segmentLatencyMs: 1000,
             }
         };
 
         const result = AgentRuntimeManifestSchema.safeParse(runtime);
         expect(result.success).toBe(true);
+    });
+
+    it.each([
+        { segmentMaxTurns: 0 },
+        { segmentMaxTurns: 1.5 },
+        { segmentLatencyMs: 0 },
+    ])('rejects invalid provider segment budgets %#', (budgets) => {
+        expect(AgentRuntimeManifestSchema.safeParse({
+            name: 'test-agent', version: '1.0.0', budgets,
+        }).success).toBe(false);
     });
 
     it('should validate communication.topicSweeper', () => {

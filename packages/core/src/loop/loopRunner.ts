@@ -92,6 +92,10 @@ function resolveTraceIdForTurnParent(
 type LoopRunnerOptions = {
     maxTurns?: number;
     latencyMs?: number;
+    /** A non-terminal provider boundary; unlike maxTurns this never fails the task. */
+    segmentMaxTurns?: number;
+    /** Checked between completed turns and yields instead of failing the task. */
+    segmentLatencyMs?: number;
     manifestProvenance?: ManifestProvenance;
     collectTraces?: boolean;
     autoJoinInvitedTopics?: boolean;
@@ -674,6 +678,8 @@ export async function runLoop<
 
     const start = Date.now();
     const maxTurns = opts.maxTurns ?? Infinity; // no default - respect manifest values
+    const segmentMaxTurns = opts.segmentMaxTurns;
+    const executionTurnLimit = segmentMaxTurns ?? maxTurns;
     try {
         log.info('LoopRunner started', { maxTurns, latencyMs: opts.latencyMs, taskId });
     } catch {
@@ -1689,7 +1695,7 @@ export async function runLoop<
         nextTopicSweepDueAt = Date.now() + topicSweeperOpts.intervalMs;
     };
 
-    for (let turnIdx = 0; turnIdx < maxTurns; turnIdx++) {
+    for (let turnIdx = 0; turnIdx < executionTurnLimit; turnIdx++) {
         // ✅ FIX: Only increment turn if this is NOT the first iteration of this loop call.
         // The first turn count is now incremented by TaskExecutor before initialization.
         if (turnIdx > 0) {
@@ -2174,7 +2180,9 @@ export async function runLoop<
                 ? ((outcome as any).observations as Observation[])
                 : [];
 
-            if (outcome.kind === 'continue' && observations.length === 0) {
+            const hasBoundedProviderSegment = opts.segmentMaxTurns !== undefined ||
+                opts.segmentLatencyMs !== undefined;
+            if (outcome.kind === 'continue' && observations.length === 0 && !hasBoundedProviderSegment) {
                 throwInvariantError(
                     'CONTINUE_WITHOUT_OBSERVATIONS',
                     'Continue outcome requires at least one observation',
@@ -2473,6 +2481,21 @@ export async function runLoop<
                 console.log(`[runLoop] budget_turns_exceeded hit! breaking loop`);
             }
             outcome = { kind: 'fail', reason: 'budget_turns_exceeded' };
+            break;
+        }
+
+        const segmentTurnBoundary = segmentMaxTurns !== undefined && turnIdx === segmentMaxTurns - 1;
+        const segmentLatencyBoundary = opts.segmentLatencyMs !== undefined &&
+            Date.now() - start >= opts.segmentLatencyMs;
+        if (segmentTurnBoundary || segmentLatencyBoundary) {
+            log.debug('Provider segment boundary reached', {
+                taskId,
+                runId,
+                turnIdx,
+                segmentMaxTurns,
+                segmentLatencyMs: opts.segmentLatencyMs,
+                elapsedMs: Date.now() - start,
+            });
             break;
         }
 

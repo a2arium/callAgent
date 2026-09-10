@@ -307,6 +307,10 @@ type AgentRuntimeManifestV1 = {
     maxTurns?: number;
     /** Maximum total latency budget for a run. */
     latencyMs?: number;
+    /** Maximum loop iterations per durable provider segment; reaching it pauses rather than fails. */
+    segmentMaxTurns?: number;
+    /** Maximum elapsed time per provider segment, checked between turns; reaching it pauses rather than fails. */
+    segmentLatencyMs?: number;
     /** Optional cap on concurrent effects per turn. */
     maxConcurrentEffects?: number;
   };
@@ -404,6 +408,12 @@ type AgentRuntimeManifestV1 = {
 ### Runtime semantics
 
 The exact behavioral meaning of runtime fields such as `budgets`, `hitl`, `cache`, and `safety` MUST be defined by CallAgent runtime documentation.
+
+`segmentMaxTurns` and `segmentLatencyMs` are non-terminal provider boundaries. When
+either is configured, an agent may return `{ kind: 'continue', observations: [] }`
+after committing domain progress; CallAgent persists the latest snapshot and pauses
+the provider segment at the configured boundary. Without a segment boundary,
+observation-free `continue` remains invalid to prevent an unbounded busy loop.
 
 ### Manifest consent enforcement
 

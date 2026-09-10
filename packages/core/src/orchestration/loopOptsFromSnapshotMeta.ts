@@ -5,21 +5,32 @@
  */
 export function readLoopBudgetsFromSnapshotMeta(
     meta: unknown
-): { maxTurns: number; latencyMs?: number } | undefined {
+): { maxTurns?: number; latencyMs?: number; segmentMaxTurns?: number; segmentLatencyMs?: number } | undefined {
     if (meta == null || typeof meta !== 'object' || Array.isArray(meta)) {
         return undefined;
     }
     const m = meta as {
-        budgets?: { maxTurns?: number; latencyMs?: number };
+        budgets?: {
+            maxTurns?: number;
+            latencyMs?: number;
+            segmentMaxTurns?: number;
+            segmentLatencyMs?: number;
+        };
         maxTurns?: number;
         latencyMs?: number;
     };
-    if (
-        m.budgets != null &&
-        typeof m.budgets === 'object' &&
-        typeof m.budgets.maxTurns === 'number'
-    ) {
-        return { maxTurns: m.budgets.maxTurns, latencyMs: m.budgets.latencyMs };
+    if (m.budgets != null && typeof m.budgets === 'object' && [
+        m.budgets.maxTurns,
+        m.budgets.latencyMs,
+        m.budgets.segmentMaxTurns,
+        m.budgets.segmentLatencyMs,
+    ].some((value) => typeof value === 'number')) {
+        return {
+            maxTurns: m.budgets.maxTurns,
+            latencyMs: m.budgets.latencyMs,
+            segmentMaxTurns: m.budgets.segmentMaxTurns,
+            segmentLatencyMs: m.budgets.segmentLatencyMs,
+        };
     }
     if (typeof m.maxTurns === 'number') {
         return { maxTurns: m.maxTurns, latencyMs: m.latencyMs };
