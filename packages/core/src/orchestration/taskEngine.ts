@@ -2759,7 +2759,10 @@ export class TaskEngine {
         const projectionWriteMode = readProjectionWriteMode();
         const limit = clampAgentRunLimit(params.limit);
         const projection = prisma ? new OperatorProjectionRepository(prisma as never) : undefined;
-        if (projectionMode === 'semantic' || params.scheduleId !== undefined) {
+        // The semantic projection is the authoritative one-row-per-logical-task
+        // fleet source. In auto mode prefer it whenever the store supports it;
+        // the raw driver-run bridge remains a compatibility fallback only.
+        if (projectionMode === 'semantic' || projectionMode === 'auto' || params.scheduleId !== undefined) {
             const semanticPage = await projection?.listAgentRuns({
                 tenantId: params.tenantId,
                 agentId: params.agentId,

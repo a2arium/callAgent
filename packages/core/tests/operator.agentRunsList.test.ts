@@ -540,6 +540,41 @@ describe('TaskEngine operator agent run list', () => {
         expect(prisma.turnRun.findMany).not.toHaveBeenCalled();
     });
 
+    it('prefers one logical semantic run over repeated provider records in auto mode', async () => {
+        process.env.CALLAGENT_OPERATOR_PROJECTION_READ = 'auto';
+        const prisma = {
+            driverRun: {
+                findMany: jest.fn(async () => {
+                    throw new Error('raw provider rows must remain a fallback');
+                }),
+            },
+            agentRun: {
+                findMany: jest.fn(async () => [{
+                    id: 'logical-root', tenantId: 'default', taskId: 'root-task', rootTaskId: 'root-task',
+                    agentId: 'root-agent', scope: 'root', status: 'running', childCount: 0, turnCount: 2591,
+                    logicalTurnCount: 1, llmCallCount: 0, memoryOpCount: 0, knownCostUsd: null,
+                    startedAt: now, terminalAt: null, durationMs: null, terminalCode: null,
+                    terminalMessage: null, outputState: 'not_captured', traceId: null,
+                    providerRunId: 'provider-root', updatedAt: now,
+                }]),
+                count: jest.fn(async () => 1),
+                groupBy: jest.fn(async () => [{ status: 'running', _count: { _all: 1 } }]),
+            },
+            agentRunEdge: { findMany: jest.fn(async () => []) },
+            turnRun: { groupBy: jest.fn(async () => []) },
+            runEffect: {},
+        };
+
+        const engine = new TaskEngine({});
+        (engine as unknown as { sessionManager: { store: { prisma?: typeof prisma } } }).sessionManager.store.prisma = prisma;
+
+        const page = await engine.listAgentRuns({ tenantId: 'default', scope: 'roots', limit: 100 });
+        expect(page.projection).toEqual({ source: 'semantic', partial: false });
+        expect(page.items).toHaveLength(1);
+        expect(page.items[0]).toEqual(expect.objectContaining({ taskId: 'root-task', logicalTurns: 1 }));
+        expect(prisma.driverRun.findMany).not.toHaveBeenCalled();
+    });
+
     it('returns semantic fleet summary and applies filters before pagination', async () => {
         process.env.CALLAGENT_OPERATOR_PROJECTION_READ = 'semantic';
         const rootRow = {
