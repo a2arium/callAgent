@@ -153,3 +153,14 @@ export function turnStackLabel(stack: TurnStack): string {
     ? `Turn ${stack.displayFirstSeq}`
     : `Turns ${stack.displayFirstSeq}–${stack.displayLastSeq}`;
 }
+
+/**
+ * Prefer the authoritative live state over a boundary retained from a
+ * completed provider segment. The boundary remains available on the stack for
+ * diagnostics, but it no longer masquerades as the current logical-turn
+ * status after continuation or recovery has started.
+ */
+export function turnStackStateLabel(stack: TurnStack): string {
+  if (stack.status === 'running' || stack.status === 'recovering') return stack.status;
+  return stack.boundary ?? stack.status;
+}

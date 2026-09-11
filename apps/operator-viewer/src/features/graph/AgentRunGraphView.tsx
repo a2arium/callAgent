@@ -18,7 +18,7 @@ import { formatCost, formatDuration } from '../../design/format';
 import { buildNodeRollup, deriveStatus, normalizeRuntimeStatus, type GraphInsights } from '../../domain/derive';
 import { semanticAttentionFromTurns, semanticFailureFromTurns } from '../../domain/semanticFailure';
 import type { AgentRunGraph, AgentRunNode, TurnRun } from '../../types';
-import { buildTurnStacks, turnStackLabel, type TurnStack } from '../../domain/turnStacks';
+import { buildTurnStacks, turnStackLabel, turnStackStateLabel, type TurnStack } from '../../domain/turnStacks';
 import { cn } from '../../lib/utils';
 import { Button } from '../../design/components/ui/button';
 
@@ -245,7 +245,7 @@ function TurnRunNodeCard(props: NodeProps<TurnNodeData>): React.ReactElement {
   const { stack, selected } = props.data;
   const finalTurn = stack.turns.at(-1)!;
   const status = normalizeRuntimeStatus(stack.status);
-  const boundary = humanizeBoundary(stack.boundary);
+  const stateLabel = humanizeBoundary(turnStackStateLabel(stack));
   const flowLabel = `${finalTurn.cognition.stageBefore ?? '?'} → ${finalTurn.cognition.stageAfter ?? stack.boundary ?? 'continue'}`;
   const llmCalls = stack.turns.reduce((count, turn) => count + turn.llmCalls.length, 0);
   const failedLlmCalls = stack.turns.flatMap((turn) => turn.llmCalls).filter((call) => isRecord(call) && call.terminalReason !== undefined && call.terminalReason !== 'completed').length;
@@ -266,7 +266,7 @@ function TurnRunNodeCard(props: NodeProps<TurnNodeData>): React.ReactElement {
         <div className="flex min-w-0 items-start justify-between gap-1.5">
           <div className="min-w-0">
             <p className="truncate text-[11px] font-semibold">{turnStackLabel(stack)}</p>
-            <p className="mt-0.5 truncate text-[10px] text-muted-foreground" title={flowLabel}>{boundary ?? status}</p>
+            <p className="mt-0.5 truncate text-[10px] text-muted-foreground" title={flowLabel}>{stateLabel}</p>
           </div>
           <div className="flex shrink-0 items-start gap-1">
             <span className="rounded border border-border bg-card px-1 py-0.5 text-[9px] font-medium text-muted-foreground" title={`Segment ${stack.segment.turnSeq}`}>#{stack.segment.turnSeq}</span>

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildTurnStacks } from './turnStacks';
+import { buildTurnStacks, turnStackStateLabel } from './turnStacks';
 import type { CognitiveTurnRun, TurnRun } from '../types';
 
 describe('buildTurnStacks', () => {
@@ -45,10 +45,14 @@ describe('buildTurnStacks', () => {
   it('uses the authoritative segment state instead of an obsolete paused boundary', () => {
     const active = { ...baseSegment(), status: 'running' as const, severity: 'info' as const, boundaryKind: 'paused' };
     active.cognitiveTurns = [{ ...cognitiveTurn(1), disposition: 'committed', cognition: { transition: { kind: 'await_event' } } }];
-    expect(buildTurnStacks([active])[0]?.status).toBe('running');
+    const runningStack = buildTurnStacks([active])[0];
+    expect(runningStack?.status).toBe('running');
+    expect(runningStack && turnStackStateLabel(runningStack)).toBe('running');
 
     const recovering = { ...active, status: 'recovering' as const, severity: 'warning' as const };
-    expect(buildTurnStacks([recovering])[0]?.status).toBe('recovering');
+    const recoveringStack = buildTurnStacks([recovering])[0];
+    expect(recoveringStack?.status).toBe('recovering');
+    expect(recoveringStack && turnStackStateLabel(recoveringStack)).toBe('recovering');
   });
 });
 
