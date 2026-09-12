@@ -366,22 +366,36 @@ export class AgentResultCache {
      */
     async releaseArtifactOwner(tenantId: string, ownerId: string): Promise<number> {
         this.assertArtifactIdentity('owner-release', ownerId);
-        return this.prisma.$transaction(async (tx: any) => {
-            const references: Array<{ cacheEntryId: string }> = await tx.artifactReference.findMany({
-                where: { tenantId, ownerId },
-                select: { cacheEntryId: true },
+        const pageSize = 500;
+        let released = 0;
+        // Always take the first remaining page instead of holding one large
+        // interactive transaction. This keeps every transaction bounded and
+        // also makes a timed-out caller safe to retry from committed pages.
+        for (;;) {
+            const pageReleased = await this.prisma.$transaction(async (tx: any) => {
+                const references: Array<{ artifactId: string; cacheEntryId: string }> = await tx.artifactReference.findMany({
+                    where: { tenantId, ownerId },
+                    orderBy: { artifactId: 'asc' },
+                    take: pageSize,
+                    select: { artifactId: true, cacheEntryId: true },
+                });
+                if (references.length === 0) return 0;
+                const artifactIds = references.map((reference) => reference.artifactId);
+                const result = await tx.artifactReference.deleteMany({
+                    where: { tenantId, ownerId, artifactId: { in: artifactIds } },
+                });
+                const cacheEntryIds = [...new Set(references.map((reference) => reference.cacheEntryId))];
+                await tx.agentResultCache.deleteMany({
+                    where: {
+                        id: { in: cacheEntryIds },
+                        artifactReferences: { none: {} },
+                    },
+                });
+                return result.count;
             });
-            if (references.length === 0) return 0;
-            const result = await tx.artifactReference.deleteMany({ where: { tenantId, ownerId } });
-            const cacheEntryIds = [...new Set(references.map((reference) => reference.cacheEntryId))];
-            await tx.agentResultCache.deleteMany({
-                where: {
-                    id: { in: cacheEntryIds },
-                    artifactReferences: { none: {} },
-                },
-            });
-            return result.count;
-        });
+            released += pageReleased;
+            if (pageReleased === 0) return released;
+        }
     }
 
     /** Delete an artifact only when no durable owner still references it. */

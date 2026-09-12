@@ -128,11 +128,14 @@ describe('durable artifact references', () => {
     });
 
     it('releases an owner and atomically deletes only payloads with no remaining owner', async () => {
-        let calls = 0;
+        const remaining = [
+            { artifactId: 'artifact-stale', cacheEntryId: 'cache-stale' },
+            { artifactId: 'artifact-shared', cacheEntryId: 'cache-shared' },
+        ];
         const tx = {
             artifactReference: {
-                findMany: jest.fn(async () => calls === 0 ? [{ cacheEntryId: 'cache-stale' }, { cacheEntryId: 'cache-shared' }] : []),
-                deleteMany: jest.fn(async () => ({ count: calls++ === 0 ? 2 : 0 })),
+                findMany: jest.fn(async () => remaining.splice(0, 500)),
+                deleteMany: jest.fn(async ({ where }: any) => ({ count: where.artifactId.in.length })),
             },
             agentResultCache: { deleteMany: jest.fn(async () => ({ count: 1 })) },
         };
@@ -140,11 +143,48 @@ describe('durable artifact references', () => {
         const cache = new AgentResultCache(prisma as any);
         await expect(cache.releaseArtifactOwner('tenant', 'checkpoint:cig:active')).resolves.toBe(2);
         await expect(cache.releaseArtifactOwner('tenant', 'checkpoint:cig:active')).resolves.toBe(0);
-        expect(tx.artifactReference.deleteMany).toHaveBeenCalledWith({ where: { tenantId: 'tenant', ownerId: 'checkpoint:cig:active' } });
+        expect(tx.artifactReference.findMany).toHaveBeenCalledWith({
+            where: { tenantId: 'tenant', ownerId: 'checkpoint:cig:active' },
+            orderBy: { artifactId: 'asc' },
+            take: 500,
+            select: { artifactId: true, cacheEntryId: true },
+        });
+        expect(tx.artifactReference.deleteMany).toHaveBeenCalledWith({ where: {
+            tenantId: 'tenant', ownerId: 'checkpoint:cig:active',
+            artifactId: { in: ['artifact-stale', 'artifact-shared'] },
+        } });
         expect(tx.agentResultCache.deleteMany).toHaveBeenCalledWith({ where: {
             id: { in: ['cache-stale', 'cache-shared'] },
             artifactReferences: { none: {} },
         } });
+    });
+
+    it('releases large owners in retryable bounded transactions', async () => {
+        const remaining = Array.from({ length: 1_201 }, (_, index) => ({
+            artifactId: `artifact-${String(index).padStart(4, '0')}`,
+            cacheEntryId: `cache-${index}`,
+        }));
+        const transactionPageSizes: number[] = [];
+        const tx = {
+            artifactReference: {
+                findMany: jest.fn(async ({ take }: any) => remaining.slice(0, take)),
+                deleteMany: jest.fn(async ({ where }: any) => {
+                    const ids = new Set(where.artifactId.in);
+                    transactionPageSizes.push(ids.size);
+                    for (let index = remaining.length - 1; index >= 0; index -= 1) {
+                        if (ids.has(remaining[index].artifactId)) remaining.splice(index, 1);
+                    }
+                    return { count: ids.size };
+                }),
+            },
+            agentResultCache: { deleteMany: jest.fn(async () => ({ count: 0 })) },
+        };
+        const prisma = { $transaction: jest.fn(async (fn: (client: typeof tx) => Promise<unknown>) => fn(tx)) };
+        const cache = new AgentResultCache(prisma as any);
+
+        await expect(cache.releaseArtifactOwner('tenant', 'checkpoint:cig:large')).resolves.toBe(1_201);
+        expect(transactionPageSizes).toEqual([500, 500, 201]);
+        expect(prisma.$transaction).toHaveBeenCalledTimes(4);
     });
 
     it('loads an expired artifact while a durable owner retains it', async () => {
