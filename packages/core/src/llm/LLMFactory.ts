@@ -1,6 +1,7 @@
 import { LLMConfig } from '../shared/types/LLMTypes.js';
 import { LLMCallerAdapter } from './LLMCallerAdapter.js';
-import type { TaskContext } from '../shared/types/index.js';
+import type { TaskContext, UsageRecord } from '../shared/types/index.js';
+import type { RegisteredProviders } from 'callllm';
 
 /**
  * Configuration for embedding functionality
@@ -21,7 +22,7 @@ export function createLLMForTask(config: LLMConfig, ctx: TaskContext): LLMCaller
     // Create the adapter with the recordUsage function from the context
     return new LLMCallerAdapter(
         config,
-        (cost: number | { cost: number }) => ctx.recordUsage(cost as any),
+        (cost: number | UsageRecord) => ctx.recordUsage(cost),
         ctx
     );
 }
@@ -42,7 +43,7 @@ export async function createEmbeddingFunction(): Promise<(text: string) => Promi
 
     // Create a dedicated LLM caller for embeddings
     const embeddingCaller = new LLMCaller(
-        config.provider as any, // Cast to avoid type issues
+        config.provider as RegisteredProviders,
         'fast', // Use fast model
         'Assistant', // Dummy system prompt
         {
@@ -90,7 +91,7 @@ export async function createEmbeddingFunctionWithTracking(
     const { LLMCaller } = await import('callllm');
 
     const embeddingCaller = new LLMCaller(
-        config.provider as any, // Cast to avoid type issues
+        config.provider as RegisteredProviders,
         'fast',
         'Assistant',
         {

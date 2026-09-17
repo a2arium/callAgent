@@ -1,9 +1,9 @@
 // Minimal W3C Trace Context helpers
-import { v4 as uuidv4 } from 'uuid';
+import { v7 as uuidv7 } from 'uuid';
 
 /** Generate a new correlation ID (UUID v4) for turn/trace correlation. */
 export function generateCorrelationId(): string {
-    return uuidv4();
+    return uuidv7();
 }
 
 function randomHex(bytes: number): string {

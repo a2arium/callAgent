@@ -38,22 +38,31 @@ await jest.unstable_mockModule(a2aPath, () => ({
     }
 } as any));
 
+const mockOutboxPublisherStart = jest.fn().mockImplementation(() => undefined);
 await jest.unstable_mockModule(outboxPath, () => ({
-    outboxPublisher: { start: jest.fn(), stop: jest.fn() }
+    OutboxPublisher: jest.fn().mockImplementation(() => ({
+        start: mockOutboxPublisherStart,
+        stop: jest.fn(),
+    })),
 }));
 
 await jest.unstable_mockModule(loopRunnerPath, () => ({
-    runLoop: (...args: any[]) => runLoopMock(...args)
+    runLoop: (...args: any[]) => runLoopMock(...args),
+    flushBufferedOperatorTurnEvents: jest.fn(async () => undefined),
 }));
 
 await jest.unstable_mockModule(pluginManagerPath, () => ({
     PluginManager: class {
-        async getPluginManifest(agentId: string) {
+        static async getPluginManifest(agentId: string) {
             return { runMode: 'loop' };
         }
-        async findAgent(agentName: string) {
+        static findAgent(agentName: string) {
             return {
                 manifest: { name: agentName },
+                resolved: {
+                    runtimeManifest: { name: agentName, version: '1.0.0', runMode: 'loop' },
+                    agentCard: { name: agentName, version: '1.0.0' },
+                },
                 loop: {},
                 llmAdapter: {},
                 tenantId: 'test-tenant'
@@ -80,7 +89,14 @@ class FakeSessionStore {
 
     seed(tenantId: string, sessionId: string, snapshot: Record<string, unknown>, wmVersion = BigInt(0), agentId = 'agent'): void {
         const key = `${tenantId}:${sessionId}`;
-        this.snapshots.set(key, { wmVersion, snapshot, agentId, updatedAt: new Date().toISOString() });
+        const meta = { ...((snapshot.meta as Record<string, unknown> | undefined) ?? {}) };
+        meta.turnCoordinator ??= {
+            schemaVersion: 1, nextFence: '0', nextTurnSeq: 0,
+            requestedGeneration: '0', completedGeneration: '0',
+        };
+        this.snapshots.set(key, {
+            wmVersion, snapshot: { ...snapshot, meta }, agentId, updatedAt: new Date().toISOString(),
+        });
     }
 
     getEvents(tenantId: string, sessionId: string) {
@@ -569,23 +585,21 @@ describe('TaskEngine Enhanced Coverage Tests', () => {
         });
 
         test('handles outbox publisher startup failures', async () => {
-            // Mock outbox publisher to fail on start
-            await jest.unstable_mockModule(outboxPath, () => ({
-                outboxPublisher: {
-                    start: jest.fn().mockRejectedValue(new Error('OUTBOX_STARTUP_ERROR')),
-                    stop: jest.fn()
-                }
-            }));
+            const prev = process.env.DISABLE_OUTBOX_PUBLISHER;
+            delete process.env.DISABLE_OUTBOX_PUBLISHER;
+            mockOutboxPublisherStart.mockImplementationOnce(() => {
+                throw new Error('OUTBOX_STARTUP_ERROR');
+            });
 
-            const { TaskEngine: TaskEngineWithFailingOutbox } = await import(taskEnginePath);
+            const engine = new TaskEngine({
+                sessionStore: new FakeSessionStore() as any,
+                handlerInvoker: { invoke: jest.fn() } as any
+            });
+            expect(engine).toBeDefined();
 
-            expect(() => {
-                const engine = new TaskEngineWithFailingOutbox({
-                    sessionStore: new FakeSessionStore() as any,
-                    handlerInvoker: { invoke: jest.fn() } as any
-                });
-                expect(engine).toBeDefined();
-            }).not.toThrow();
+            mockOutboxPublisherStart.mockReset();
+            mockOutboxPublisherStart.mockImplementation(() => undefined);
+            process.env.DISABLE_OUTBOX_PUBLISHER = prev;
         });
     });
 

@@ -3,7 +3,10 @@ import type { Request, Response } from 'express';
 import { EngineLocator } from '../../orchestration/EngineLocator.js';
 import type { TaskEngine, TaskEntity } from '../../orchestration/taskEngine.js';
 import { handleSSE } from '../sse/streamHandler.js';
-import { WorkingMemorySessionStore } from '@a2arium/callagent-memory-sql';
+import { normalizeRpcTaskParams } from './taskParams.js';
+import { resolveRpcActiveRunTimeout } from './activeRunTimeout.js';
+
+type RequestWithTenant = Request & { tenantId?: string };
 
 /**
  * Handler for the tasks/sendSubscribe method
@@ -12,10 +15,11 @@ import { WorkingMemorySessionStore } from '@a2arium/callagent-memory-sql';
 export async function handleTasksSubscribe(req: Request, res: Response): Promise<void> {
     try {
         // Extract request data
-        const { params } = req.body;
+        const body = req.body as { params?: unknown };
+        const params = normalizeRpcTaskParams(body.params);
 
-        if (!params?.id) {
-            return sendError(res, -32602, 'Invalid params: task ID is required');
+        if (!params) {
+            return sendError(res, -32602, 'Invalid params: params object is required');
         }
 
         // Create a task entity
@@ -29,13 +33,42 @@ export async function handleTasksSubscribe(req: Request, res: Response): Promise
 
         // Send initial response (acknowledgement)
         // Don't await the task completion - we'll stream updates
-        engine.startTask({ task, isStreaming: true }).catch((error: unknown) => {
+        const startedAtMs = Date.now();
+        const tenantId = typeof params.tenantId === 'string'
+            ? params.tenantId
+            : (req as RequestWithTenant).tenantId || 'default';
+        engine.startTask({
+            task,
+            isStreaming: true,
+            agentId: typeof params.agentId === 'string' ? params.agentId : undefined,
+            tenantId: typeof params.tenantId === 'string'
+                ? params.tenantId
+                : ((req as RequestWithTenant).tenantId || req.header('x-tenant-id') || undefined),
+        }).then(async (started) => {
+            if (
+                typeof engine.awaitTaskTerminal === 'function' &&
+                (started?.status === undefined ||
+                    started.status.state === 'submitted' ||
+                    started.status.state === 'working')
+            ) {
+                const timeout = resolveRpcActiveRunTimeout(
+                    typeof params.agentId === 'string' ? params.agentId : undefined,
+                );
+                await engine.awaitTaskTerminal({
+                    tenantId,
+                    taskId: task.id,
+                    agentId: typeof params.agentId === 'string' ? params.agentId : undefined,
+                    timeoutMs: timeout.timeoutMs,
+                    timeoutSource: timeout.source,
+                    startedAtMs,
+                });
+            }
+        }).catch((error: unknown) => {
             console.error('Error in streaming task execution:', error);
         });
 
         // Hand off to SSE handler (never returns - response is managed by SSE)
-        const tenantId = (req as any).tenantId || 'default';
-        await handleSSE(req, res, task.id, new (WorkingMemorySessionStore as any)(), tenantId);
+        await handleSSE(req, res, task.id, undefined, tenantId);
     } catch (error: unknown) {
         console.error('Error handling tasks/sendSubscribe:', error);
         sendError(

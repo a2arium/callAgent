@@ -32,15 +32,15 @@ export function validatePgEnvironment(context?: string): void {
 }
 
 /**
- * Logs all pg-related environment variables for diagnostic purposes.
- * Useful when debugging connection issues.
+ * Logs pg-related environment variable presence and runtime type without ever
+ * exposing credentials or connection-string prefixes.
  */
 export function dumpPgEnvironment(context?: string): void {
     const label = context ? `[${context}]` : '[pg-env-dump]';
     for (const key of PG_ENV_KEYS) {
         const value = process.env[key];
         if (value !== undefined) {
-            console.log(`${label} ${key}: type=${typeof value}, value=${typeof value === 'string' ? value.substring(0, 30) + '...' : JSON.stringify(value)}`);
+            console.log(`${label} ${key}: type=${typeof value}, configured=true`);
         }
     }
 }

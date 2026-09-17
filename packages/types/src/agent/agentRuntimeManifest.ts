@@ -1,5 +1,20 @@
 import { z } from 'zod';
 
+const uniqueNonEmptyStrings = z.array(z.string().trim().min(1)).superRefine((values, ctx) => {
+  if (new Set(values).size !== values.length) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Values must be unique' });
+  }
+});
+
+const declarableIntentIdentifiers = uniqueNonEmptyStrings.superRefine((values, ctx) => {
+  const wrappers = new Set(['prompt_user', 'answer_with_llm', 'call_tool', 'delegate_to_child']);
+  values.forEach((value, index) => {
+    if (wrappers.has(value)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `Generic intent wrapper "${value}" cannot be configured as a domain intent`, path: [index] });
+    }
+  });
+});
+
 /**
  * Agent Runtime Manifest Schema (Internal Execution Contract)
  *
@@ -26,15 +41,20 @@ export const AgentRuntimeManifestSchema = z.object({
   budgets: z.object({
     maxTurns: z.number().int().positive().optional(),
     latencyMs: z.number().int().positive().optional(),
+    /** Maximum cognition iterations executed by one durable provider segment. */
+    segmentMaxTurns: z.number().int().positive().optional(),
+    /** Maximum wall time spent between completed cognition iterations in one segment. */
+    segmentLatencyMs: z.number().int().positive().optional(),
     maxConcurrentEffects: z.number().int().positive().optional(),
   }).strict().optional(),
 
   /** Human-in-the-loop policy */
   hitl: z.object({
     level: z.enum(['advise', 'consent', 'guardrails']).optional(),
+    consentTtlMs: z.number().int().positive().optional().default(86_400_000),
     requireConsentFor: z.object({
-      intents: z.array(z.string()).optional(),
-      tools: z.array(z.string()).optional(),
+      intents: declarableIntentIdentifiers.optional(),
+      tools: uniqueNonEmptyStrings.optional(),
     }).strict().optional(),
   }).strict().optional(),
 
@@ -65,6 +85,13 @@ export const AgentRuntimeManifestSchema = z.object({
     agents: z.array(z.string()).optional(),
   }).strict().optional(),
 
+  /** Explicit orchestration privileges granted to this agent. */
+  orchestration: z.object({
+    rootTaskSubmission: z.object({
+      allowAgents: uniqueNonEmptyStrings,
+    }).strict().optional(),
+  }).strict().optional(),
+
   /** Memory configuration */
   memory: z.object({
     profile: z.string().optional(),
@@ -79,6 +106,59 @@ export const AgentRuntimeManifestSchema = z.object({
     logs: z.object({
       level: z.enum(['debug', 'info', 'warn', 'error']).optional(),
     }).strict().optional(),
+  }).strict().optional(),
+
+  /** Communication behavior hints for framework-level conversation handling */
+  communication: z.object({
+    autoJoinInvitedTopics: z.boolean().optional().default(false),
+    /**
+     * Idle TTL for conversation threads in milliseconds.
+     * When omitted, the framework default (1 hour) applies.
+     * When `null`, TTL is disabled for this agent (threads never auto-expire).
+     */
+    threadTtlMs: z.union([z.number().int().positive(), z.null()]).optional(),
+    /**
+     * While an agent loop is running, periodically auto-archive **closed** topics older than
+     * `autoArchiveAfterMs` (requires a registered framework `TaskEngine`).
+     * Omit `topicSweeper` to disable scheduled sweeps (manual `triggerTopicLifecycleSweep` still works).
+     */
+    topicSweeper: z
+      .object({
+        intervalMs: z.number().int().positive(),
+        batchSize: z.number().int().positive().max(10_000).optional(),
+        autoArchiveAfterMs: z.number().int().positive(),
+      })
+      .strict()
+      .optional(),
+    /** When false, other agents cannot open threads targeting this agent (Phase 4d). Default: allow. */
+    threadable: z.boolean().optional(),
+    /**
+     * When true, a topic message delivery cold-starts a turn on this agent. Default false (observation
+     * is queued for the next natural wake).
+     */
+    wakeOnTopicMessage: z.boolean().optional().default(false),
+    /** If set, only these speech acts are accepted for inbound thread/topic deliveries. */
+    acceptedSpeechActs: z
+      .array(
+        z.enum([
+          'question',
+          'answer',
+          'inform',
+          'request',
+          'task',
+          'followup',
+          'signal',
+          'vote',
+          'system',
+        ])
+      )
+      .optional(),
+    /** If set, inbound content must declare a matching `mimeType` when provided as an object. */
+    acceptedContentTypes: z.array(z.string().min(1)).optional(),
+    /** Optional JSON Schema blobs keyed by a stable id (validation hooks may use these in future). */
+    jsonSchemas: z.record(z.string(), z.unknown()).optional(),
+    /** Declared policy capability tokens (e.g. `selector_policy:my.policy`, `stop_custom:my.stop`). */
+    topicPoliciesSupported: z.array(z.string().min(1)).optional(),
   }).strict().optional(),
 }).strict();
 

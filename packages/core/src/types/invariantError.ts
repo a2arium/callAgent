@@ -14,6 +14,7 @@ export const InvariantErrorCodeSchema = z.enum([
     'INPUT_TOKEN_EXPIRED',
     'TOOL_TOKEN_NOT_FOUND',
     'CHILD_TOKEN_NOT_FOUND',
+    'EXTERNAL_EVENT_TOKEN_NOT_FOUND',
     'TOKEN_MISMATCH',
 
     // Observation validation
@@ -70,7 +71,7 @@ export const InvariantErrorDetailSchema = z.discriminatedUnion('type', [
     // Token validation failures
     z.object({
         type: z.literal('token_validation'),
-        category: z.enum(['input', 'tool', 'child']),
+        category: z.enum(['input', 'tool', 'child', 'event']),
         token: z.string().optional(),
         expectedToken: z.string().optional(),
         reason: z.enum(['missing', 'expired', 'mismatch', 'unknown_token']),

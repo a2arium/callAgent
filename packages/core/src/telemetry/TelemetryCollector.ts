@@ -7,24 +7,23 @@ import { logger } from '@a2arium/callagent-utils';
 const log = logger.createLogger({ prefix: 'TelemetryCollector' });
 
 import { ConsoleProvider } from './providers/ConsoleProvider.js';
-import { OpikProvider } from './providers/OpikProvider.js';
 
 export class TelemetryCollector {
     private static instance: TelemetryCollector;
     private providers: TelemetryProvider[] = [];
     private nodeRegistry = new Map<string, TelemetryNode>();
+    private defaultProvidersInitialized = false;
 
-    private constructor() {
-        this.autoDiscoverProviders();
-    }
+    private constructor() { }
 
-    private autoDiscoverProviders() {
+    public initializeDefaultProviders(): void {
+        if (this.defaultProvidersInitialized) {
+            return;
+        }
+        this.defaultProvidersInitialized = true;
+
         if (process.env.TELEMETRY_CONSOLE === 'true' || process.env.CONSOLE_TELEMETRY === 'true') {
             this.addProvider(new ConsoleProvider());
-        }
-
-        if (process.env.CALLAGENT_OPIK_ENABLED === 'true' || !!process.env.OPIK_API_KEY) {
-            this.addProvider(new OpikProvider());
         }
     }
 
@@ -43,14 +42,17 @@ export class TelemetryCollector {
     public clearProviders(): void {
         this.providers = [];
         this.nodeRegistry.clear();
+        this.defaultProvidersInitialized = true;
     }
 
     public registerNode(node: TelemetryNode): void {
+        this.initializeDefaultProviders();
         this.nodeRegistry.set(node.id, node);
         this.broadcast(p => p.onNodeStart(node));
     }
 
     public endNode(node: TelemetryNode): void {
+        this.initializeDefaultProviders();
         this.broadcast(p => p.onNodeEnd(node));
         // We might want to keep it in registry for later reference or clear it
         // For now, let's keep it to allow usage updates after end (e.g. async cost calculation)
@@ -58,10 +60,12 @@ export class TelemetryCollector {
     }
 
     public failNode(node: TelemetryNode, error: Error): void {
+        this.initializeDefaultProviders();
         this.broadcast(p => p.onNodeFailure(node, error));
     }
 
     public updateUsage(node: TelemetryNode): void {
+        this.initializeDefaultProviders();
         this.broadcast(p => p.onUsageUpdate(node, node.usage));
     }
 
@@ -69,8 +73,30 @@ export class TelemetryCollector {
         return this.nodeRegistry.get(id);
     }
 
+    /** Snapshot of registered nodes for diagnostics and custom providers. */
+    public getRegisteredNodes(): TelemetryNode[] {
+        return [...this.nodeRegistry.values()];
+    }
+
+    /**
+     * Best-effort flush for providers that buffer. Call before process exit in CLIs.
+     */
+    public async shutdownProviders(): Promise<void> {
+        for (const p of this.providers) {
+            const maybe = (p as { flush?: () => Promise<void> }).flush;
+            if (typeof maybe === 'function') {
+                try {
+                    await maybe();
+                } catch (err) {
+                    log.error(`Provider ${p.name} flush error`, err);
+                }
+            }
+        }
+    }
+
     /** Emit the assembled TurnTrace to all providers. Called exactly once per turn by loopRunner. */
     public emitTurnTrace(trace: TurnTrace): void {
+        this.initializeDefaultProviders();
         this.broadcast((p) => p.onTurnTrace(trace));
     }
 

@@ -84,11 +84,22 @@ export class StreamTransport {
             if (token) console.log(`Token: ${token}`);
             console.log(`Session: (see earlier log: Starting TaskEngine.startTask { taskId: ... })`);
         } else if (isFinal) {
-            const reason = (status as any)?.metadata?.reason;
-            if (status.state === 'failed' && reason === 'budget_turns_exceeded') {
-                return;
-            }
             console.log(`Status: ${status.state} (FINAL)`);
+            if (status.state === 'completed') {
+                console.log('Loop outcome: kind: complete');
+            } else if (status.state === 'failed') {
+                console.log('Loop outcome: kind: fail');
+            } else if (status.state === 'canceled') {
+                console.log('Loop outcome: kind: canceled');
+            }
+            const md = status.metadata as { result?: unknown } | undefined;
+            if (status.state === 'completed' && md && 'result' in md && md.result !== undefined) {
+                try {
+                    console.log(`Complete result: ${JSON.stringify(md.result, null, 2)}`);
+                } catch {
+                    console.log(`Complete result: ${String(md.result)}`);
+                }
+            }
             this.logAggregates(status);
         } else if (status.state === 'working') {
             this.logWorkingProgress(status);
@@ -163,9 +174,6 @@ export class StreamTransport {
 
     private logMessage(status: TaskStatus): void {
         if (!status.message?.parts?.length) return;
-
-        const reason = (status as any)?.metadata?.reason;
-        if (status.state === 'failed' && reason === 'budget_turns_exceeded') return;
 
         const textParts = this.extractTextParts(status);
         if (textParts.length > 0) {

@@ -1,32 +1,30 @@
 {
   "name": "callagent",
   "version": "0.3.0",
-  "description": "AI Agents Framework with A2A Support",
+  "description": "Private monorepo for the callAgent TypeScript agent framework.",
   "type": "module",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
-  "exports": {
-    ".": {
-      "import": "./dist/index.js",
-      "require": "./dist/index.js",
-      "types": "./dist/index.d.ts"
-    }
-  },
-  "files": [
-    "dist",
-    "README.md",
-    "LICENSE"
-  ],
   "scripts": {
     "postinstall": "node scripts/sync-dotenv.cjs",
     "build": "yarn turbo run build",
     "generate:prisma": "npx prisma generate --schema=packages/memory-sql/prisma/schema.prisma && npx prisma generate --schema=packages/chat-bridge/prisma/schema.prisma && npx prisma generate --schema=packages/core/prisma/schema.prisma",
+    "runtime": "yarn workspace @a2arium/callagent-cli build && node packages/cli/dist/cli.js dev",
     "start": "node packages/core/dist/runner/runnerCli.js",
     "dev": "node --loader ts-node/esm packages/core/src/runner/runnerCli.ts",
     "run-agent": "yarn build && node packages/core/dist/runner/runnerCli.js",
-    "test": "node --preserve-symlinks --experimental-vm-modules ./node_modules/jest/bin/jest.js",
-    "run:hello": "yarn run-agent apps/examples/hello-agent/dist/AgentModule.js '{\"name\": \"World\"}'",
-    "run:hello-no-deps": "yarn run-agent apps/examples/hello-agent/dist/AgentModule.js '{\"name\": \"World\"}' --no-resolve-deps",
+    "jest": "node --max-old-space-size=8192 --no-warnings --preserve-symlinks --experimental-vm-modules ./node_modules/jest/bin/jest.js",
+    "test": "yarn run jest",
+    "test:coverage": "yarn run jest --coverage",
+    "hatchet:poc:up": "node scripts/hatchet-poc.mjs up",
+    "hatchet:poc:down": "node scripts/hatchet-poc.mjs down",
+    "hatchet:poc:restart": "node scripts/hatchet-poc.mjs restart",
+    "test:hatchet:poc": "node --test scripts/hatchet-poc.test.mjs",
+    "projection:reconcile-terminals": "yarn workspace @a2arium/callagent-core build && node packages/core/dist/operator/terminalProjectionReconcilerCli.js",
+    "verify:core-imports": "node scripts/verify-core-imports.mjs",
+    "verify:publish-manifests": "node scripts/check-publish-manifests.mjs",
+    "verify:packlists": "node scripts/check-packlists.mjs",
+    "verify:docs": "node scripts/check-callagent-docs.mjs",
+    "run:hello": "yarn run-agent apps/examples/hello-agent/dist/agent.js '{\"value\": \"hello\"}'",
+    "run:hello-no-deps": "yarn run-agent apps/examples/hello-agent/dist/agent.js '{\"value\": \"hello\"}' --no-resolve-deps",
     "input": "node packages/core/dist/runner/runnerCli.js input",
     "agent-cache": "yarn build && node packages/core/dist/runner/cacheCli.js",
     "agent-index": "yarn build && node packages/core/dist/runner/agentsCli.js index",
@@ -40,17 +38,31 @@
     "publish:dry-run": "yarn workspaces run npm:publish:dry-run",
     "version:patch": "yarn workspaces run version:patch",
     "version:minor": "yarn workspaces run version:minor",
-    "version:major": "yarn workspaces run version:major"
+    "version:major": "yarn workspaces run version:major",
+    "operator:run-graph": "node scripts/operator-run-graph.mjs",
+    "operator:retention": "tsx scripts/operator-retention.ts"
   },
   "keywords": [
     "ai",
     "agent",
     "framework"
   ],
-  "author": "Your Name <your.email@example.com>",
-  "license": "ISC",
+  "author": "A2arium <a2arium@gmail.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/a2arium/callAgent.git"
+  },
+  "bugs": {
+    "url": "https://github.com/a2arium/callAgent/issues"
+  },
+  "homepage": "https://github.com/a2arium/callAgent#readme",
+  "engines": {
+    "node": ">=20"
+  },
   "devDependencies": {
     "@jest/test-sequencer": "29.7.0",
+    "@testcontainers/nats": "^11.14.0",
     "@types/aws-lambda": "^8.10.152",
     "@types/express": "^5.0.1",
     "@types/jest": "^29.5.14",
@@ -61,15 +73,15 @@
     "jest": "^29.7.0",
     "jest-mock-extended": "^4.0.0-beta1",
     "ngrok": "^5.0.0-beta.2",
-    "prisma": "^7.4.0",
+    "prisma": "7.4.0",
     "ts-jest": "^29.3.2",
     "ts-node": "^10.9.2",
     "turbo": "^2.5.3",
     "typescript": "^5.8.3"
   },
   "dependencies": {
-    "@prisma/adapter-pg": "^7.4.0",
-    "@prisma/client": "^7.4.0",
+    "@prisma/adapter-pg": "7.4.0",
+    "@prisma/client": "7.4.0",
     "dotenv": "^17.3.1",
     "tsx": "^4.21.0"
   },

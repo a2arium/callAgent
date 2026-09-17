@@ -1,5 +1,15 @@
 import type { TaskContext } from '../shared/types/index.js';
-import type { GoalHierarchy, GoalId, GoalNode, GoalStatus, GoalType, MentalState } from './types.js';
+import type {
+    GoalHierarchy,
+    GoalId,
+    GoalNode,
+    GoalStatus,
+    GoalType,
+    MentalState,
+    TaskContextGoalAddInput,
+    TaskContextGoalUpdatePatch,
+    TaskContextGoalsReadFilter,
+} from './types.js';
 import { throwInvariantError } from '../utils/invariantError.js';
 
 function nowIso(): string { return new Date().toISOString(); }
@@ -46,10 +56,7 @@ function upsertNode(h: GoalHierarchy, node: GoalNode, parentId?: GoalId, order?:
     }
 }
 
-export async function addGoal(
-    ctx: TaskContext,
-    input: { id?: GoalId; title: string; type?: GoalType; priority?: number; parentId?: GoalId; context?: GoalNode['context'] }
-): Promise<GoalId> {
+export async function addGoal(ctx: TaskContext, input: TaskContextGoalAddInput): Promise<GoalId> {
     const M = ensureMental(ctx);
     const h = M.goalState.hierarchy;
     const id = input.id || `g_${Math.random().toString(36).slice(2)}`;
@@ -70,11 +77,7 @@ export async function addGoal(
     return id;
 }
 
-export async function updateGoal(
-    ctx: TaskContext,
-    id: GoalId,
-    patch: Partial<Omit<GoalNode, 'id' | 'createdAt'>>
-): Promise<void> {
+export async function updateGoal(ctx: TaskContext, id: GoalId, patch: TaskContextGoalUpdatePatch): Promise<void> {
     const M = ensureMental(ctx);
     const h = M.goalState.hierarchy;
     const existing = h.nodes[id];
@@ -179,10 +182,7 @@ export async function failGoal(ctx: TaskContext, id: GoalId): Promise<void> {
     h.nodes[id] = { ...existing, status: 'failed', updatedAt: nowIso() };
 }
 
-export async function listGoals(
-    ctx: TaskContext,
-    filter?: { status?: GoalStatus; parentId?: GoalId; type?: GoalType }
-): Promise<GoalNode[]> {
+export async function listGoals(ctx: TaskContext, filter?: TaskContextGoalsReadFilter): Promise<GoalNode[]> {
     const M = ensureMental(ctx);
     const h = M.goalState.hierarchy;
     let nodes = Object.values(h.nodes);

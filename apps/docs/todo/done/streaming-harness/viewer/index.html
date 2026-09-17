@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Runtime Streaming Viewer</title>
+  <link rel="stylesheet" href="/viewer.css">
+</head>
+<body>
+  <main class="shell">
+    <section class="controls" aria-label="stream controls">
+      <div class="title-row">
+        <h1>Runtime Streaming Viewer</h1>
+        <span id="state" class="state idle">idle</span>
+      </div>
+
+      <label>
+        RPC endpoint
+        <input id="endpoint" value="http://127.0.0.1:8790/rpc" spellcheck="false">
+      </label>
+
+      <div class="grid">
+        <label>
+          Method
+          <select id="method">
+            <option value="tasks/sendSubscribe">tasks/sendSubscribe</option>
+            <option value="tasks/resubscribe">tasks/resubscribe</option>
+            <option value="tasks/input">tasks/input</option>
+          </select>
+        </label>
+        <label>
+          Visibility
+          <select id="visibility">
+            <option value="public">public</option>
+            <option value="debug">debug</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="grid">
+        <label>
+          Task ID
+          <input id="taskId" value="viewer-task-1" spellcheck="false">
+        </label>
+        <label>
+          Tenant ID
+          <input id="tenantId" value="default" spellcheck="false">
+        </label>
+      </div>
+
+      <label>
+        Agent ID
+        <input id="agentId" value="streaming-demo-agent" spellcheck="false">
+      </label>
+
+      <label>
+        Input token
+        <input id="token" placeholder="required for tasks/input" spellcheck="false">
+      </label>
+
+      <label>
+        Input JSON
+        <textarea id="inputJson" spellcheck="false">{
+  "text": "hello from streaming viewer"
+}</textarea>
+      </label>
+
+      <details>
+        <summary>Headers JSON</summary>
+        <textarea id="headersJson" spellcheck="false">{}</textarea>
+      </details>
+
+      <div class="buttons">
+        <button id="connect">Connect</button>
+        <button id="disconnect" disabled>Disconnect</button>
+        <button id="clear">Clear</button>
+      </div>
+
+      <div class="direct">
+        <label>
+          Direct SSE URL
+          <input id="directUrl" placeholder="http://127.0.0.1:3000/sse/task?visibility=debug" spellcheck="false">
+        </label>
+        <button id="connectDirect">Connect Direct SSE</button>
+      </div>
+    </section>
+
+    <section class="summary" aria-label="stream summary">
+      <div><strong>Total</strong><span id="countTotal">0</span></div>
+      <div><strong>Public</strong><span id="countPublic">0</span></div>
+      <div><strong>Debug</strong><span id="countDebug">0</span></div>
+      <div><strong>Private</strong><span id="countPrivate">0</span></div>
+      <div><strong>Terminal</strong><span id="terminal">no</span></div>
+    </section>
+
+    <section class="events" aria-label="stream events">
+      <div class="events-head">
+        <h2>Events</h2>
+        <label class="filter">
+          Filter
+          <input id="filter" placeholder="type, visibility, text..." spellcheck="false">
+        </label>
+      </div>
+      <div id="events" class="event-list"></div>
+    </section>
+  </main>
+  <script type="module" src="/viewer.js"></script>
+</body>
+</html>

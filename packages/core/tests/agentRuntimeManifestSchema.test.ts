@@ -40,11 +40,66 @@ describe('AgentRuntimeManifestSchema', () => {
             runMode: 'loop',
             budgets: {
                 maxTurns: 10,
-                latencyMs: 5000
+                latencyMs: 5000,
+                segmentMaxTurns: 4,
+                segmentLatencyMs: 1000,
             }
         };
 
         const result = AgentRuntimeManifestSchema.safeParse(runtime);
         expect(result.success).toBe(true);
+    });
+
+    it.each([
+        { segmentMaxTurns: 0 },
+        { segmentMaxTurns: 1.5 },
+        { segmentLatencyMs: 0 },
+    ])('rejects invalid provider segment budgets %#', (budgets) => {
+        expect(AgentRuntimeManifestSchema.safeParse({
+            name: 'test-agent', version: '1.0.0', budgets,
+        }).success).toBe(false);
+    });
+
+    it('should validate communication.topicSweeper', () => {
+        const runtime = {
+            name: 'test-agent',
+            version: '1.0.0',
+            runMode: 'loop',
+            communication: {
+                topicSweeper: {
+                    intervalMs: 30_000,
+                    batchSize: 50,
+                    autoArchiveAfterMs: 3_600_000,
+                },
+            },
+        };
+
+        const result = AgentRuntimeManifestSchema.safeParse(runtime);
+        expect(result.success).toBe(true);
+    });
+
+    it('validates manifest consent identifiers and defaults the TTL', () => {
+        const result = AgentRuntimeManifestSchema.parse({
+            name: 'test-agent', version: '1.0.0',
+            hitl: { requireConsentFor: { intents: ['activate_bundle'], tools: ['publish'] } },
+        });
+        expect(result.hitl?.consentTtlMs).toBe(86_400_000);
+    });
+
+    it.each([
+        { intents: [''] },
+        { intents: ['activate_bundle', 'activate_bundle'] },
+        { intents: ['call_tool'] },
+        { tools: ['publish', 'publish'] },
+    ])('rejects invalid manifest consent configuration %#', (requireConsentFor) => {
+        expect(AgentRuntimeManifestSchema.safeParse({
+            name: 'test-agent', version: '1.0.0', hitl: { requireConsentFor },
+        }).success).toBe(false);
+    });
+
+    it('rejects a non-positive consent TTL', () => {
+        expect(AgentRuntimeManifestSchema.safeParse({
+            name: 'test-agent', version: '1.0.0', hitl: { consentTtlMs: 0 },
+        }).success).toBe(false);
     });
 });

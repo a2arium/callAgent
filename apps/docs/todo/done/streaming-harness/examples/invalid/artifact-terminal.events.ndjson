@@ -1,0 +1,2 @@
+{"version":"2026-05-02","id":"evt-artifact-terminal-000","seq":0,"taskId":"task-artifact-terminal","tenantId":"tenant-test","agentId":"bad-artifact-agent","ts":"2026-05-03T00:06:00.000Z","type":"artifact.done","visibility":"public","channel":"user","data":{"artifactId":"response","index":0,"terminal":true}}
+

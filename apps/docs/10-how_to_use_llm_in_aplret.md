@@ -24,6 +24,18 @@ Policy may decide to use an LLM. Policy never calls an LLM.
 
 This is APLRET Rule 3 (Single Effect Boundary) and Rule 5 (Sync, M-only Policy).
 
+## Where prompts, handlers, and schemas live
+
+Standard repository layout (especially for non-trivial agents):
+
+| Concern | Location |
+|---------|----------|
+| Prompt text / prompt builders | `prompts/` |
+| LLM invocation (handlers) | `effects/llm/` |
+| Structured output schemas (Zod / JSON Schema) | `contracts/llm/` |
+
+This keeps wording discoverable, effects testable, and contracts reusable. Same idea for tools: `effects/tools/` and `contracts/tools/`. Full decision map: [Agent repository layout](./14-agent_repository_layout_for_aplret.md) and [APLRET contracts](./0-aplret_contracts.md).
+
 ---
 
 ## Step 1: Configure LLM for your agent
@@ -124,6 +136,47 @@ const responses = await ctx.llm.call('Summarize this document:', {
 });
 ```
 
+### Bound or cancel the complete LLM operation
+
+Use `timeoutMs` for one total deadline across provider dispatch, retries, structured-output validation, tools, chunking, usage callbacks, and final bookkeeping. Use `signal` when an external owner must be able to cancel the operation. If both are supplied, the first terminal outcome wins.
+
+```ts
+import {
+  LLMCancelledError,
+  LLMTimeoutError,
+} from '@a2arium/callagent-core';
+
+const controller = new AbortController();
+
+try {
+  const responses = await ctx.llm.call('Assess this evidence:', {
+    data: evidence,
+    jsonSchema: { name: 'Assessment', schema: AssessmentSchema },
+    timeoutMs: 60_000,
+    signal: controller.signal,
+  });
+  // handle responses
+} catch (error) {
+  if (error instanceof LLMTimeoutError) {
+    return {
+      action: intent,
+      result: { status: 'error', error: { code: error.code, timeoutMs: error.timeoutMs } },
+    };
+  }
+  if (error instanceof LLMCancelledError) {
+    return {
+      action: intent,
+      result: { status: 'error', error: { code: error.code } },
+    };
+  }
+  throw error;
+}
+```
+
+`timeoutMs` must be an integer from `1` through `2_147_483_647`. Omitting both controls preserves existing behavior. Do not use a caller-side `Promise.race()` as a substitute: it stops awaiting but cannot revoke provider work or quarantine late bookkeeping. A timed-out call rejects with `LLMTimeoutError` (`code: 'LLM_TIMEOUT'`); an explicit abort rejects with `LLMCancelledError` (`code: 'LLM_CANCELLED'`).
+
+Streaming accepts the same controls. Its deadline starts when `ctx.llm.stream()` is called, even if iteration begins later. Breaking iteration delegates cancellation and iterator cleanup to `callllm`.
+
 ---
 
 ## Step 3: Structured output with contracts
@@ -137,6 +190,8 @@ The `callllm` library handles the heavy lifting:
 1. **Zod → JSON Schema conversion** — pass a Zod object directly, callllm converts it.
 2. **Automatic validation** — callllm validates the LLM output against the schema and retries if needed.
 3. **Automatic parsing** — no need to `JSON.parse()`. The parsed object is available in `response.contentObject`.
+
+> Note: `contentObject` is provided by the underlying `callllm` response type. It is convenient and supported in examples, but it is not a framework-owned field with a separate CallAgent compatibility guarantee.
 
 ```ts
 import { z } from 'zod';
@@ -614,7 +669,7 @@ export default createAgent({
     };
   },
 
-  transition: (_env, exec) => {
+  transition: (_env, exec, _m, _mem) => {
     if (exec.action.kind === 'ask_user') {
       return { kind: 'await_input', token: exec.action.token };
     }
@@ -645,7 +700,7 @@ export default createAgent({
       return { kind: 'complete', result: exec.result.data };
     }
 
-    return { kind: 'continue', observations: [] };
+    return { kind: 'complete', result: { ok: false, reason: 'no_transition_match' } };
   }
 }, import.meta.url);
 ```
@@ -737,6 +792,8 @@ Use these when debugging or testing to assert that the expected LLM calls were m
 | With data payload | `ctx.llm.call(prompt, { data })` | Data appended to context, auto-chunked |
 | Structured output (Zod) | `ctx.llm.call(prompt, { jsonSchema: { name, schema: ZodObject } })` | Use `response.contentObject` — auto-validated |
 | Structured output (JSON) | `ctx.llm.call(prompt, { jsonSchema: { name, schema: jsonObj } })` | Same features, Zod preferred |
+| Deadline | `ctx.llm.call(prompt, { timeoutMs: 60_000 })` | One deadline across retries, tools, and chunks; throws `LLMTimeoutError` |
+| External cancellation | `ctx.llm.call(prompt, { signal })` | Throws `LLMCancelledError`; provider abort is best effort |
 | Streaming | `ctx.llm.stream(prompt)` | `AsyncIterable<UniversalStreamResponse>` |
 | Change settings | `ctx.llm.updateSettings({ temperature: 0 })` | Affects subsequent calls |
 | Tool result | `ctx.llm.addToolResult(id, result, name)` | For manual tool loops |

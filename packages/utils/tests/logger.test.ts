@@ -1,10 +1,14 @@
 import { jest } from '@jest/globals';
-import { withLoggingContext, updateLoggingContext } from '../src/loggingContext.js';
+import {
+    installLoggingContextConsoleBridge,
+    withLoggingContext,
+    updateLoggingContext,
+} from '../src/loggingContext.js';
 import { ComponentLogger } from '../src/logger.js';
 
 describe('ComponentLogger and loggingContext', () => {
-    it('includes logging context in prefixes and metadata', () => {
-        return withLoggingContext({ taskId: 'task-12345678', tenantId: 'tenant', agentId: 'agent', turn: 3 }, () => {
+    it('includes logging context in prefixes and metadata', async () => {
+        await withLoggingContext({ taskId: 'task-12345678', tenantId: 'tenant', agentId: 'agent', turn: 3 }, async () => {
             const logger = new ComponentLogger({ level: 'debug', prefix: 'Test' });
             const child = logger.createLogger({ prefix: 'Child' });
 
@@ -20,8 +24,8 @@ describe('ComponentLogger and loggingContext', () => {
         });
     });
 
-    it('serializes error contexts safely', () => {
-        return withLoggingContext({ taskId: 'err-task' }, () => {
+    it('serializes error contexts safely', async () => {
+        await withLoggingContext({ taskId: 'err-task' }, async () => {
             updateLoggingContext({ stage: 'test' });
             const logger = new ComponentLogger({ level: 'error', prefix: 'Err' });
             const errSpy = jest.spyOn(console, 'error').mockImplementation(() => { });
@@ -31,5 +35,20 @@ describe('ComponentLogger and loggingContext', () => {
             expect(errSpy).toHaveBeenCalled();
             errSpy.mockRestore();
         });
+    });
+
+    it('forwards scoped console output to a logging sink', async () => {
+        installLoggingContextConsoleBridge();
+        const sink = jest.fn(() => undefined);
+
+        await withLoggingContext({ taskId: 'sink-task', logSink: sink }, async () => {
+            console.info('hello', { value: 1 });
+        });
+
+        expect(sink).toHaveBeenCalledWith(expect.objectContaining({
+            level: 'info',
+            message: expect.stringContaining('hello'),
+            context: expect.objectContaining({ taskId: 'sink-task' }),
+        }));
     });
 });

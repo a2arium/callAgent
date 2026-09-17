@@ -47,6 +47,12 @@ Keep it boring:
 
 **Require:** exhaustiveness.
 
+Learning’s `switch (obs.kind)` assumes a **closed discriminated union** for normalized observations — see [APLRET contracts](./0-aplret_contracts.md) (Observation model). Open `kind: string` shapes defeat exhaustiveness and reviewability.
+
+### `flow.md` and branch IDs
+
+For non-trivial agents, major branches in code should have **named counterparts** in **`flow.md`** (e.g. `### B1: Validation failure`). Stable IDs (`B1`, `B2`, …) tie together code review, tests, and debugging. See [How-to: `flow.md` for APLRET agents](./13-flow_md_for_aplret_agents.md).
+
 ### Policy: compact decision branching
 
 **Use:**
@@ -254,4 +260,13 @@ Fix:
 ## Fast PR comment
 
 > Branching style is drifting across modules. Please follow the APLRET branching policy: guard-style Perception, reducer-style Learning, compact Policy, pipeline Shield, exhaustive dispatch in Execution and Transition. Ensure new union members are handled exhaustively.
+
+## Conversation invite branching note
+
+When adding topic invite lifecycle behavior, keep the same branching discipline:
+
+- Perception: guard-validate `topic.invite.received|accepted|declined|expired`
+- Learning: reducer cases update `pendingInvites` / `invitesInbox`
+- Execution: exhaustive `Intent` dispatch (`invite`, `join`, `decline`, `leave`, `post`)
+- Transition: emit explicit conversation observations; do not hide invite state transitions in ad-hoc control flags
 

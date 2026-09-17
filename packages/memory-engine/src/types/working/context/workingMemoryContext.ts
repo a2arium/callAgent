@@ -4,8 +4,9 @@ import { getMemoryProfile } from '../../../lifecycle/config/MemoryProfiles.js';
 import { TaskContext } from '../../../shared/types/index.js';
 import type { WorkingVariables } from '../../../shared/types/workingMemory.js';
 import { WorkingMemoryBackend, IMemory } from '@a2arium/callagent-types';
+import type { RecallOptions, RememberOptions } from '../../../shared/types/memoryLifecycle.js';
 import { MLOSemanticBackend, MLOEpisodicBackend, MLOEmbedBackend } from '../../../MLOBackends.js';
-import { SemanticMemoryRegistry } from '../../semantic/SemanticMemoryRegistry.js';
+import { SemanticMemoryRegistry, type SemanticMemoryEvent } from '../../semantic/SemanticMemoryRegistry.js';
 import { EpisodicMemoryRegistry } from '../../episodic/EpisodicMemoryRegistry.js';
 import { EmbedMemoryRegistry } from '../../embed/EmbedMemoryRegistry.js';
 import { PrismaClient } from '@a2arium/callagent-memory-sql/generated';
@@ -13,6 +14,19 @@ import type { PrismaClient as PrismaClientType } from '@a2arium/callagent-memory
 import { logger } from '@a2arium/callagent-utils';
 
 const contextLogger = logger.createLogger({ prefix: 'WorkingMemoryContext' });
+
+type OperatorMemoryEventSink = {
+    __operatorMemoryEvent?: (event: {
+        op: 'read' | 'write' | 'delete';
+        keys: string[];
+        query?: unknown;
+        resultKeys?: string[];
+        resultCount?: number;
+        status?: 'success' | 'failure';
+        backend?: string;
+        source: 'loop.memory' | 'context.memory';
+    }) => Promise<void> | void;
+};
 
 /**
  * Resolve memory configuration from agent manifest
@@ -79,6 +93,14 @@ export async function extendContextWithMemory(
     existingPrismaClient?: unknown
 ): Promise<TaskContext> {
     const memoryConfig = resolveMemoryConfiguration(agentConfig);
+    const assertMutationAllowed = (operation: string): void => {
+        const signal = (baseContext as { abortSignal?: AbortSignal }).abortSignal;
+        if (!signal?.aborted) return;
+        if (signal.reason instanceof Error) throw signal.reason;
+        throw Object.assign(new Error(`Task execution no longer permits ${operation}`), {
+            code: 'TASK_TURN_OWNERSHIP_LOST',
+        });
+    };
 
     // Create working memory adapter if SQL adapter is available
     let workingMemoryAdapter: WorkingMemoryBackend | undefined;
@@ -113,7 +135,10 @@ export async function extendContextWithMemory(
     if (!semanticMemoryAdapter && prisma) {
         try {
             const { MemorySQLAdapter } = await import('@a2arium/callagent-memory-sql') as any;
-            semanticMemoryAdapter = new MemorySQLAdapter({ prismaClient: prisma });
+            semanticMemoryAdapter = new MemorySQLAdapter({
+                prismaClient: prisma,
+                defaultTenantId: tenantId,
+            });
             contextLogger.debug('Semantic memory adapter auto-created from existing Prisma client', {
                 tenantId,
                 agentId
@@ -132,10 +157,18 @@ export async function extendContextWithMemory(
         memoryLifecycleConfig: memoryConfig,
         workingMemoryAdapter,
         semanticAdapter: semanticMemoryAdapter,
-        agentId
+        agentId,
+        mutationGuard: assertMutationAllowed,
     });
 
     const context = baseContext as TaskContext;
+    const emitOperatorSemanticEvent = async (event: SemanticMemoryEvent): Promise<void> => {
+        try {
+            await (context as TaskContext & OperatorMemoryEventSink).__operatorMemoryEvent?.(event);
+        } catch {
+            // Operator capture is best-effort and must not affect memory semantics.
+        }
+    };
 
     // Add new namespaced helpers
     (context as any).goals = {
@@ -184,9 +217,25 @@ export async function extendContextWithMemory(
     };
 
     // Add unified operations
-    context.recall = async (query: string, options?: any) => unifiedMemory.recall(query, options);
-    context.remember = async (key: string, value: unknown, options?: any) =>
-        unifiedMemory.remember(key, value, options);
+    context.recall = async (query: string, options?: RecallOptions) => {
+        const result = await unifiedMemory.recall(query, options);
+        await emitOperatorSemanticEvent({
+            op: 'read',
+            keys: [],
+            backend: 'mlo',
+            source: 'context.memory',
+        });
+        return result;
+    };
+    context.remember = async (key: string, value: unknown, options?: RememberOptions) => {
+        await unifiedMemory.remember(key, value, options);
+        await emitOperatorSemanticEvent({
+            op: 'write',
+            keys: [key],
+            backend: 'mlo',
+            source: 'context.memory',
+        });
+    };
 
     // Replace memory interface with MLO-backed registries
     // ✅ FIX: Preserve the SQL backend alongside MLO backend
@@ -203,15 +252,20 @@ export async function extendContextWithMemory(
         // IMPORTANT: Include both SQL and MLO backends so direct .set() calls work
         semantic: new SemanticMemoryRegistry(
             semanticBackends,
-            'mlo' // MLO is default, but SQL backend is available too
+            'mlo', // MLO is default, but SQL backend is available too
+            emitOperatorSemanticEvent,
+            context,
+            assertMutationAllowed
         ) as unknown as IMemory['semantic'],
         episodic: new EpisodicMemoryRegistry(
             { mlo: new MLOEpisodicBackend(unifiedMemory) },
-            'mlo'
+            'mlo',
+            assertMutationAllowed
         ),
         embed: new EmbedMemoryRegistry(
             { mlo: new MLOEmbedBackend(unifiedMemory) },
-            'mlo'
+            'mlo',
+            assertMutationAllowed
         ),
 
         // Direct MLO access for advanced use cases
@@ -223,6 +277,7 @@ export async function extendContextWithMemory(
 
     context.semantic = {
         add: async (item: { id: string; value?: unknown; data?: unknown; tags?: string[]; entities?: Record<string, unknown> }) => {
+            assertMutationAllowed('semantic.add');
             const registry = semanticRegistryAccessor();
             const val = item.value !== undefined ? item.value : item.data;
             if (!registry?.set) {
@@ -239,6 +294,7 @@ export async function extendContextWithMemory(
             }
         },
         remove: async (idOrPredicate: string | Record<string, unknown> | ((entry: { id: string; value: unknown; tags?: string[]; entities?: Record<string, unknown> }) => boolean)) => {
+            assertMutationAllowed('semantic.remove');
             const registry = semanticRegistryAccessor();
             if (!registry) return;
             try {

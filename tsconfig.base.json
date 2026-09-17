@@ -47,6 +47,12 @@
       "@a2arium/callagent-chat-bridge/*": [
         "packages/chat-bridge/src/*"
       ],
+      "@a2arium/callagent-eventbus-nats": [
+        "packages/eventbus-nats/src/index.ts"
+      ],
+      "@a2arium/callagent-eventbus-nats/*": [
+        "packages/eventbus-nats/src/*"
+      ],
       "@chat-prisma/*": [
         "packages/chat-bridge/src/generated/prisma/*"
       ]

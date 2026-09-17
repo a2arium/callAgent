@@ -1,38 +1,119 @@
-import type { TaskContext } from '../shared/types/index.js';
+import type { TaskContext, TaskInput } from '../shared/types/index.js';
 import {
     oneTurn,
     type Modules,
     type TurnOutcome,
     type TransitionOut,
+    type ExecOutcome,
     type ExecResult,
     type ExecErrorPayload,
     type AttentionSignal,
     type Observation
 } from './oneTurn.js';
 import type { Intent, ExecutableAction } from '../types/intent.js';
+import { resolveStoredPlanStep } from '../plans/dispatchStoredPlanStep.js';
+import {
+    asHandlerStampOpts,
+    attachPlanStepCorrelation,
+    lookupPendingPlanStep,
+    pickPlanStepStamp,
+    type PlanStepStamp,
+    type PlanStepStampFields,
+} from '../plans/planStepCorrelation.js';
+import {
+    LLMRespondedPayloadSchema,
+    ValidationFailedPayloadSchema,
+} from '../types/observation.js';
 import { normalizeObservationInbox, type EnvironmentState, type MentalState, type ObservationInbox } from './types.js';
 import { logger, updateLoggingContext } from '@a2arium/callagent-utils';
 import { TurnNode } from '../telemetry/nodes/TurnNode.js';
+import { WorkflowNode } from '../telemetry/nodes/WorkflowNode.js';
 import { telemetry } from '../telemetry/TelemetryCollector.js';
-import { Plan, PlanState, PlanStep, PlanId, PlanSchema } from '../types/plan.js';
+import { Plan, PlanState, PlanStep, PlanId, PlanSchema, PlanStepUpdatedPayloadSchema } from '../types/plan.js';
+import { applyPlanPatch, PlanPatchPayloadSchema } from '../plans/planPatch.js';
 import { throwInvariantError } from '../utils/invariantError.js';
 import { InvariantError } from '../utils/errors.js';
-import type { InternalTaskContext } from './internalContext.js';
-import type { TurnTrace, ManifestProvenance, TurnTimings } from '../types/turnTrace.js';
+import { isTaskLifecycleTerminalError } from '@a2arium/callagent-types/task-lifecycle-terminal';
+import { isTaskTurnSupersededError } from '@a2arium/callagent-types/task-turn-superseded';
+import type { InternalTaskContext, OperatorMemoryEvent } from './internalContext.js';
+import type { TurnTrace, ManifestProvenance, TurnTimings, TurnUsage } from '../types/turnTrace.js';
 import { TurnTraceSchema } from '../types/turnTrace.js';
-import { summarizePending } from '../telemetry/turnTraceHelpers.js';
-import { aggregateUsage } from '../telemetry/turnTraceHelpers.js';
+import { summarizePending, aggregateUsage, compactModuleOutput } from '../telemetry/turnTraceHelpers.js';
 import { generateCorrelationId } from '../tracing/Tracing.js';
-import { v4 as uuidv4 } from 'uuid';
+import { v7 as uuidv7 } from 'uuid';
 import { TurnTraceCollector } from '../telemetry/TurnTraceCollector.js';
+import { reduceConversationProjection } from './learning/conversationReducer.js';
+import { runDefaultAutoJoinInvitedTopics } from '../policy/defaultAutoJoinPolicy.js';
+import { EngineLocator } from '../orchestration/EngineLocator.js';
+import { currentSegmentIdempotencyKey, currentTaskTurnClaim } from '../runtime/segmentProcessedKeys.js';
+import {
+    conversationInboxDeliveryKey,
+    conversationInboxDeliveryKeyFromTurnSummary,
+} from './conversationInboxIdentity.js';
 
 const log = logger.createLogger({ prefix: 'runLoop' });
+
+/**
+ * Ownership loss is an admission result, not an application failure. Module
+ * boundaries wrap provider/effect errors, so preserve these typed causes for
+ * the segment executor to prove against the latest durable snapshot.
+ */
+function hasTaskTurnOwnershipLossCause(error: unknown): boolean {
+    const seen = new Set<object>();
+    let current: unknown = error;
+    for (let depth = 0; depth < 8 && current !== undefined && current !== null; depth += 1) {
+        if (isTaskTurnSupersededError(current) || isTaskLifecycleTerminalError(current)) return true;
+        if (typeof current !== 'object' || seen.has(current)) return false;
+        seen.add(current);
+        current = (current as { cause?: unknown }).cause;
+    }
+    return false;
+}
+
+/** Walk telemetry parents and ctx so TurnNode keeps the session trace id across async boundaries. */
+function resolveTraceIdForTurnParent(
+    parentId: string | undefined,
+    ctx: TaskContext
+): string | undefined {
+    if (parentId) {
+        const seen = new Set<string>();
+        let pid: string | undefined = parentId;
+        while (pid && pid !== 'root' && !seen.has(pid)) {
+            seen.add(pid);
+            const p = telemetry.getNode(pid);
+            if (p?.traceId) return p.traceId;
+            pid = p?.parentId;
+        }
+    }
+    const tid = ctx.telemetry?.traceId;
+    return typeof tid === 'string' && tid.length > 0 ? tid : undefined;
+}
 
 type LoopRunnerOptions = {
     maxTurns?: number;
     latencyMs?: number;
+    /** A non-terminal provider boundary; unlike maxTurns this never fails the task. */
+    segmentMaxTurns?: number;
+    /** Checked between completed turns and yields instead of failing the task. */
+    segmentLatencyMs?: number;
     manifestProvenance?: ManifestProvenance;
     collectTraces?: boolean;
+    autoJoinInvitedTopics?: boolean;
+    hitl?: import('./manifestConsent.js').ManifestHitlConfig;
+    onTurnCheckpoint?: (state: {
+        M: MentalState;
+        env: EnvironmentState;
+        outcome: TurnOutcome;
+        consumedConversationMessageKeys: ReadonlySet<string>;
+    }) => Promise<void>;
+    /** When set with a registered `TaskEngine`, `runLoop` invokes `triggerTopicLifecycleSweep` when `intervalMs` of wall time has elapsed since the last sweep (checked between turns). */
+    topicSweeper?: {
+        intervalMs: number;
+        batchSize: number;
+        autoArchiveAfterMs: number;
+    };
+    /** Seeded PRNG for Policy-array sampling only. */
+    random?: () => number;
 };
 
 const DEFAULT_PROVENANCE: ManifestProvenance = {
@@ -47,6 +128,529 @@ const ensureInbox = (environment: EnvironmentState): ObservationInbox => {
     environment.inbox = normalized;
     return normalized;
 };
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+    typeof value === 'object' && value !== null;
+
+const asString = (value: unknown): string | undefined =>
+    typeof value === 'string' ? value : undefined;
+
+const stampPlanTimestamps = (plan: Plan): Plan => {
+    const now = new Date().toISOString();
+    return {
+        ...plan,
+        createdAt: plan.createdAt ?? now,
+        updatedAt: plan.updatedAt ?? now,
+    };
+};
+
+const maybeAdvancePlanCursor = (
+    writer: { plans: { update?: (id: PlanId, patch: Partial<Plan>) => void } },
+    prev: MentalState,
+    planId: string,
+    stepId: string
+): void => {
+    const plan = prev.plans?.plans?.[planId];
+    if (!plan) return;
+    if (plan.steps[plan.cursor]?.id !== stepId) return;
+    writer.plans.update?.(planId, { cursor: Math.min(plan.cursor + 1, plan.steps.length) });
+};
+
+const pendingSlotForObservation = (
+    source: Observation['source']
+): 'tools' | 'children' | 'inputs' | undefined => {
+    if (source === 'tool') return 'tools';
+    if (source === 'child') return 'children';
+    if (source === 'user') return 'inputs';
+    return undefined;
+};
+
+const copyPendingStampToTerminalIfAbsent = (
+    env: EnvironmentState,
+    slot: 'tools' | 'children',
+    token: string
+): void => {
+    const liveBag = env.pending[slot];
+    if (!liveBag || typeof liveBag !== 'object') return;
+    const entry = liveBag[token];
+    if (!isRecord(entry)) return;
+    const stamp = pickPlanStepStamp(entry as PlanStepStampFields);
+    if (stamp.planId === undefined && stamp.stepId === undefined && stamp.advanceCursor === undefined) {
+        return;
+    }
+    const terminalKey = slot === 'tools' ? 'toolTerminals' : 'childTerminals';
+    const terminals = (env.pending[terminalKey] ?? {}) as Record<string, unknown>;
+    env.pending[terminalKey] = terminals;
+    const existing = terminals[token];
+    if (isRecord(existing)) {
+        const existingStamp = pickPlanStepStamp(existing as PlanStepStampFields);
+        if (
+            existingStamp.planId !== undefined ||
+            existingStamp.stepId !== undefined ||
+            existingStamp.advanceCursor !== undefined
+        ) {
+            return;
+        }
+        terminals[token] = { ...existing, ...stamp };
+        return;
+    }
+    terminals[token] = { ...stamp };
+};
+
+const isTerminalEffectObservation = (item: Observation): boolean =>
+    (item.source === 'tool' && (item.kind === 'tool.completed' || item.kind === 'tool.failed')) ||
+    (item.source === 'child' && (item.kind === 'child.completed' || item.kind === 'child.failed')) ||
+    (item.source === 'user' && (item.kind === 'input.provided' || item.kind === 'input.cancelled'));
+
+const planValidationFailedObservation = (
+    original: {
+        payload: unknown;
+        provenance?: Observation['provenance'];
+        error?: Observation['error'];
+    },
+    schemaName: 'PlanSchema' | 'PlanStepUpdatedPayloadSchema' | 'PlanPatchSchema',
+    zodError: { format: () => unknown }
+): Observation => ({
+    source: 'internal',
+    kind: 'validation.failed',
+    payload: ValidationFailedPayloadSchema.parse({
+        reason: 'invalid_plan',
+        schemaName,
+        zodError: zodError.format(),
+        originalPayload: original.payload,
+    }),
+    provenance: original.provenance,
+    error: original.error,
+});
+
+const pushPlanningDataObservations = (obs: Observation[], data: unknown): void => {
+    if (!isRecord(data)) return;
+    if ('planProposed' in data) {
+        const parsed = PlanSchema.safeParse(data.planProposed);
+        if (parsed.success) {
+            obs.push({ source: 'internal', kind: 'plan.proposed', payload: parsed.data });
+        } else {
+            obs.push(planValidationFailedObservation(
+                { payload: data.planProposed },
+                'PlanSchema',
+                parsed.error
+            ));
+        }
+    }
+    if ('planUpdated' in data) {
+        const parsed = PlanSchema.safeParse(data.planUpdated);
+        if (parsed.success) {
+            obs.push({ source: 'internal', kind: 'plan.updated', payload: parsed.data });
+        } else {
+            obs.push(planValidationFailedObservation(
+                { payload: data.planUpdated },
+                'PlanSchema',
+                parsed.error
+            ));
+        }
+    }
+    if ('planStepUpdated' in data) {
+        const parsed = PlanStepUpdatedPayloadSchema.safeParse(data.planStepUpdated);
+        if (parsed.success) {
+            obs.push({ source: 'internal', kind: 'plan.step.updated', payload: parsed.data });
+        } else {
+            obs.push(planValidationFailedObservation(
+                { payload: data.planStepUpdated },
+                'PlanStepUpdatedPayloadSchema',
+                parsed.error
+            ));
+        }
+    }
+    if ('planPatch' in data) {
+        const parsed = PlanPatchPayloadSchema.safeParse(data.planPatch);
+        if (parsed.success) {
+            obs.push({ source: 'internal', kind: 'plan.patch', payload: parsed.data });
+        } else {
+            obs.push(planValidationFailedObservation(
+                { payload: data.planPatch },
+                'PlanPatchSchema',
+                parsed.error
+            ));
+        }
+    }
+};
+
+const inboxFromPerceptionObs = (obs: unknown): Observation[] => {
+    if (!obs || typeof obs !== 'object') return [];
+    const inbox = (obs as { inbox?: unknown }).inbox;
+    if (Array.isArray(inbox)) {
+        return inbox as Observation[];
+    }
+    if (inbox && typeof inbox === 'object' && Array.isArray((inbox as { current?: unknown }).current)) {
+        return (inbox as { current: Observation[] }).current;
+    }
+    return [];
+};
+
+type OperatorEventSink = {
+    appendOperatorEvent: (params: {
+        tenantId: string;
+        sessionId: string;
+        type: string;
+        payload: Record<string, unknown>;
+    }) => Promise<{ eventId: string; seq: number } | undefined>;
+};
+
+const OPERATOR_SUMMARY_STRING_CHARS = 1_000;
+const OPERATOR_FULL_STRING_CHARS = 2_000;
+const OPERATOR_SUMMARY_ARRAY_ITEMS = 20;
+const OPERATOR_FULL_ARRAY_ITEMS = 100;
+
+function resolveOperatorEventSink(): OperatorEventSink | undefined {
+    const engine = EngineLocator.getEngine<Partial<OperatorEventSink>>();
+    return typeof engine?.appendOperatorEvent === 'function'
+        ? { appendOperatorEvent: engine.appendOperatorEvent.bind(engine) }
+        : undefined;
+}
+
+function isOperatorCaptureEnabled(ctx: InternalTaskContext): boolean {
+    return ctx.__operatorTurnTraceCapture?.enabled !== false;
+}
+
+function operatorCaptureLevel(ctx: InternalTaskContext): 'summary' | 'full' {
+    return ctx.__operatorTurnTraceCapture?.level === 'full' ? 'full' : 'summary';
+}
+
+function compactOperatorValue(value: unknown, level: 'summary' | 'full', depth = 0): unknown {
+    const maxDepth = level === 'full' ? 6 : 6;
+    const maxStringChars = level === 'full' ? OPERATOR_FULL_STRING_CHARS : OPERATOR_SUMMARY_STRING_CHARS;
+    const maxArrayItems = level === 'full' ? OPERATOR_FULL_ARRAY_ITEMS : OPERATOR_SUMMARY_ARRAY_ITEMS;
+
+    if (depth > maxDepth) {
+        return '[truncated]';
+    }
+    if (value === null || value === undefined) {
+        return value;
+    }
+    if (typeof value === 'string') {
+        return value.length <= maxStringChars
+            ? value
+            : `${value.slice(0, maxStringChars)}... [truncated ${value.length} chars]`;
+    }
+    if (typeof value === 'number' || typeof value === 'boolean') {
+        return value;
+    }
+    if (typeof value === 'bigint') {
+        return value.toString();
+    }
+    if (Array.isArray(value)) {
+        const items = value
+            .slice(0, maxArrayItems)
+            .map((item) => compactOperatorValue(item, level, depth + 1));
+        return value.length > maxArrayItems
+            ? [...items, `... [truncated ${value.length - maxArrayItems} array items]`]
+            : items;
+    }
+    if (typeof value === 'object') {
+        const record = value as Record<string, unknown>;
+        const artifact = compactOperatorArtifact(record);
+        if (artifact !== undefined) {
+            return artifact;
+        }
+        const output: Record<string, unknown> = {};
+        for (const [key, entry] of Object.entries(record)) {
+            const compact = compactOperatorValue(entry, level, depth + 1);
+            if (compact !== undefined) {
+                output[key] = compact;
+            }
+        }
+        return output;
+    }
+    return String(value);
+}
+
+function compactOperatorArtifact(value: Record<string, unknown>): Record<string, unknown> | undefined {
+    const kind = typeof value.kind === 'string' ? value.kind : undefined;
+    if (kind === 'artifact_local') {
+        return value;
+    }
+    if (kind !== 'artifact' && value.state !== 'artifact_only') {
+        return undefined;
+    }
+    const artifactId =
+        typeof value.id === 'string'
+            ? value.id
+            : typeof value.artifactId === 'string'
+                ? value.artifactId
+                : kind === 'artifact_local'
+                    ? 'local'
+                    : 'unknown';
+    const mimeType = typeof value.mimeType === 'string' ? value.mimeType : undefined;
+    const estimatedSize =
+        typeof value.estimatedSize === 'number'
+            ? value.estimatedSize
+            : typeof value.size === 'number'
+                ? value.size
+                : kind === 'artifact_local' && typeof value.value === 'string'
+                    ? value.value.length
+                    : undefined;
+    return {
+        state: 'artifact_only',
+        artifactId,
+        summary: artifactId === 'local'
+            ? 'Local artifact'
+            : artifactId === 'unknown'
+                ? 'Artifact reference'
+                : `Artifact ${artifactId}`,
+        ...(mimeType ? { mimeType } : {}),
+        ...(estimatedSize !== undefined ? { estimatedSize } : {}),
+    };
+}
+
+async function appendOperatorEvent(
+    ctx: TaskContext,
+    type: string,
+    payload: Record<string, unknown>
+): Promise<void> {
+    const sink = resolveOperatorEventSink();
+    if (sink === undefined) {
+        return;
+    }
+    await sink.appendOperatorEvent({
+        tenantId: ctx.tenantId,
+        sessionId: ctx.task.id,
+        type,
+        payload,
+    });
+}
+
+async function appendOperatorTurnEvent(ctx: TaskContext, trace: TurnTrace): Promise<void> {
+    const internal = ctx as InternalTaskContext;
+    if (!isOperatorCaptureEnabled(internal)) {
+        return;
+    }
+    if (currentTaskTurnClaim() !== undefined) {
+        await appendOperatorTurnTraceProjection(ctx, trace, 'turn.observed');
+        internal.__pendingOperatorTurnTraces = [...(internal.__pendingOperatorTurnTraces ?? []), trace];
+        return;
+    }
+    await appendOperatorTurnTraceProjection(ctx, trace, 'turn.completed');
+}
+
+async function appendOperatorTurnTraceProjection(
+    ctx: TaskContext,
+    trace: TurnTrace,
+    type: 'turn.observed' | 'turn.completed' | 'turn.superseded'
+): Promise<void> {
+    const internal = ctx as InternalTaskContext;
+    const level = operatorCaptureLevel(internal);
+    const claim = currentTaskTurnClaim();
+    await appendOperatorEvent(ctx, type, {
+        taskId: ctx.task.id,
+        agentId: ctx.agentId,
+        turnSeq: trace.turn,
+        cognitionTurnSeq: trace.turn,
+        turnId: trace.turnId,
+        stageBefore: trace.stageBefore,
+        stageAfter: trace.stageAfter,
+        stageTransition: trace.stageTransition,
+        transition: compactOperatorValue(trace.transition, level),
+        intent: compactOperatorValue(trace.intent, level),
+        shield: compactOperatorValue(trace.shield, level),
+        manifestConsent: compactOperatorValue(trace.manifestConsent, level),
+        perception: compactOperatorValue(trace.perception, level),
+        execAction: compactOperatorValue(trace.execAction, level),
+        execResult: compactOperatorValue(trace.execResult, level),
+        timings: trace.timings,
+        usage: trace.usage,
+        llmCalls: compactOperatorValue(trace.llmCalls ?? [], level),
+        toolCalls: compactOperatorValue(trace.toolCalls ?? [], level),
+        childCalls: compactOperatorValue(trace.childCalls ?? [], level),
+        pendingAfter: trace.pendingAfter,
+        mentalStateBeforeHash: trace.mentalStateBeforeHash,
+        mentalStateAfterHash: trace.mentalStateAfterHash,
+        traceId: trace.traceId,
+        spanId: trace.spanId,
+        parentSpanId: trace.parentSpanId,
+        ...(claim ? {
+            claimId: claim.claimId,
+            fence: claim.fence,
+            claimedGeneration: claim.claimedGeneration,
+            logicalTurnSeq: claim.turnSeq,
+            segmentSeq: claim.turnSeq,
+            attemptKey: currentSegmentIdempotencyKey(),
+        } : {}),
+        level,
+    });
+}
+
+export async function flushBufferedOperatorTurnEvents(
+    ctx: TaskContext,
+    disposition: 'committed' | 'superseded'
+): Promise<void> {
+    const internal = ctx as InternalTaskContext;
+    const traces = internal.__pendingOperatorTurnTraces ?? [];
+    internal.__pendingOperatorTurnTraces = undefined;
+    for (const trace of traces) {
+        try {
+            await appendOperatorTurnTraceProjection(
+                ctx,
+                trace,
+                disposition === 'committed' ? 'turn.completed' : 'turn.superseded'
+            );
+        } catch (error) {
+            log.debug('Failed to append post-arbitration operator turn event', {
+                disposition,
+                error: error instanceof Error ? error.message : String(error),
+            });
+        }
+    }
+}
+
+async function appendOperatorTurnStartedEvent(
+    ctx: TaskContext,
+    turnSeq: number,
+    turnId?: string,
+    traceId?: string,
+    spanId?: string
+): Promise<void> {
+    const internal = ctx as InternalTaskContext;
+    if (!isOperatorCaptureEnabled(internal)) {
+        return;
+    }
+    await appendOperatorEvent(ctx, 'turn.started', {
+        taskId: ctx.task.id,
+        agentId: ctx.agentId,
+        turnSeq,
+        cognitionTurnSeq: turnSeq,
+        ...(turnId ? { turnId } : {}),
+        ...(traceId ? { traceId } : {}),
+        ...(spanId ? { spanId } : {}),
+        ...(currentTaskTurnClaim() ? {
+            claimId: currentTaskTurnClaim()!.claimId,
+            fence: currentTaskTurnClaim()!.fence,
+            claimedGeneration: currentTaskTurnClaim()!.claimedGeneration,
+            logicalTurnSeq: currentTaskTurnClaim()!.turnSeq,
+            segmentSeq: currentTaskTurnClaim()!.turnSeq,
+            attemptKey: currentSegmentIdempotencyKey(),
+        } : {}),
+    });
+}
+
+async function appendOperatorMemoryEvent(
+    ctx: TaskContext,
+    event: OperatorMemoryEvent
+): Promise<void> {
+    const internal = ctx as InternalTaskContext;
+    const hasPayload = event.keys.length > 0 || (event.resultKeys?.length ?? 0) > 0 || event.query !== undefined;
+    if (!isOperatorCaptureEnabled(internal) || !hasPayload) {
+        return;
+    }
+    await appendOperatorEvent(ctx, `memory.${event.op}`, {
+        taskId: ctx.task.id,
+        agentId: event.agentId ?? ctx.agentId,
+        turnSeq: event.turnSeq,
+        cognitionTurnSeq: event.turnSeq,
+        ...(currentTaskTurnClaim() ? {
+            claimId: currentTaskTurnClaim()!.claimId,
+            attemptKey: currentSegmentIdempotencyKey(),
+            segmentSeq: currentTaskTurnClaim()!.turnSeq,
+        } : {}),
+        op: event.op,
+        keys: event.keys.slice(0, 100),
+        keyCount: event.keys.length,
+        ...(event.query !== undefined ? { query: compactOperatorValue(event.query, operatorCaptureLevel(internal)) } : {}),
+        ...(event.resultKeys ? { resultKeys: event.resultKeys.slice(0, 100) } : {}),
+        ...(event.resultCount !== undefined ? { resultCount: event.resultCount } : {}),
+        ...(event.status ? { status: event.status } : {}),
+        backend: event.backend,
+        source: event.source,
+        traceId: ctx.telemetry?.traceId,
+        spanId: ctx.telemetry?.nodeId,
+    });
+}
+
+function semanticReadKeys(query: {
+    id?: string | string[];
+    tag?: string;
+    tags?: string[];
+    limit?: number;
+}): string[] {
+    if (typeof query.id === 'string') {
+        return [query.id];
+    }
+    if (Array.isArray(query.id)) {
+        return query.id;
+    }
+    return [];
+}
+
+function semanticQuerySummary(query: unknown): unknown {
+    if (typeof query === 'string') {
+        return { pattern: query };
+    }
+    if (!query || typeof query !== 'object' || Array.isArray(query)) {
+        return query ?? {};
+    }
+    const raw = query as Record<string, unknown>;
+    return {
+        ...(raw.id !== undefined ? { id: raw.id } : {}),
+        ...(raw.tag !== undefined ? { tag: raw.tag } : {}),
+        ...(raw.tags !== undefined ? { tags: raw.tags } : {}),
+        ...(raw.filters !== undefined ? { filters: raw.filters } : {}),
+        ...(raw.limit !== undefined ? { limit: raw.limit } : {}),
+        ...(raw.orderBy !== undefined ? { orderBy: raw.orderBy } : {}),
+        ...(raw.random !== undefined ? { random: raw.random } : {}),
+        ...(raw.backend !== undefined ? { backend: raw.backend } : {}),
+    };
+}
+
+function semanticResultKeys(results: unknown): string[] {
+    if (!Array.isArray(results)) return [];
+    return results
+        .map((item) => {
+            if (item && typeof item === 'object') {
+                const record = item as Record<string, unknown>;
+                if (typeof record.key === 'string') return record.key;
+                if (typeof record.id === 'string') return record.id;
+            }
+            return undefined;
+        })
+        .filter((key): key is string => key !== undefined);
+}
+
+function usageFromTurnCalls(iCtx: InternalTaskContext): TurnUsage | undefined {
+    const llmCalls = iCtx.__turnLlmCalls ?? [];
+    const toolCallCount = iCtx.__turnToolCalls?.length ?? 0;
+    const childCallCount = iCtx.__turnChildCalls?.length ?? 0;
+    const hasUsageData =
+        llmCalls.length > 0 ||
+        toolCallCount > 0 ||
+        childCallCount > 0 ||
+        iCtx.__turnUsage !== undefined;
+    if (!hasUsageData) {
+        return undefined;
+    }
+    const aggregate = llmCalls.length > 0
+        ? aggregateUsage(llmCalls.map((call) => ({
+              usage: {
+                  inputTokens: call.inputTokens,
+                  outputTokens: call.outputTokens,
+                  totalTokens:
+                      call.inputTokens !== undefined || call.outputTokens !== undefined
+                          ? (call.inputTokens ?? 0) + (call.outputTokens ?? 0)
+                          : undefined,
+              },
+              pricing: {
+                  cost: call.cost ?? 0,
+                  currency: 'USD',
+              },
+          })))
+        : undefined;
+
+    return {
+        ...(aggregate ?? {}),
+        ...(iCtx.__turnUsage ?? {}),
+        ...(llmCalls.length > 0 ? { llmCalls: llmCalls.length } : {}),
+        ...(toolCallCount > 0 ? { toolCalls: toolCallCount } : {}),
+        ...(childCallCount > 0 ? { childCalls: childCallCount } : {}),
+    };
+}
 
 export async function runLoop<
     Sensory = unknown,
@@ -74,8 +678,13 @@ export async function runLoop<
 
     const start = Date.now();
     const maxTurns = opts.maxTurns ?? Infinity; // no default - respect manifest values
-    try { log.info('LoopRunner started', { maxTurns }); } catch { }
-    console.log(`[LoopRunner] STARTED. MaxTurns: ${maxTurns}, LatencyMs: ${opts.latencyMs}, TaskId: ${taskId}`);
+    const segmentMaxTurns = opts.segmentMaxTurns;
+    const executionTurnLimit = segmentMaxTurns ?? maxTurns;
+    try {
+        log.info('LoopRunner started', { maxTurns, latencyMs: opts.latencyMs, taskId });
+    } catch {
+        /* noop */
+    }
 
     const inbox = ensureInbox(env);
 
@@ -91,6 +700,8 @@ export async function runLoop<
         configurable: true,
     });
     iCtx.__activeLoopEnv = env;
+    iCtx.__manifestHitl = opts.hitl;
+    iCtx.__random = opts.random;
 
     const provenance = opts.manifestProvenance ?? iCtx.__manifestProvenance ?? DEFAULT_PROVENANCE;
     const collectTraces = opts.collectTraces ?? false;
@@ -114,15 +725,84 @@ export async function runLoop<
                 read: async (q) => {
                     if (semanticRegistry?.read) {
                         const res = await semanticRegistry.read(q);
+                        const resultKeys = semanticResultKeys(res);
+                        try {
+                            await appendOperatorMemoryEvent(ctx, {
+                                op: 'read',
+                                keys: semanticReadKeys(q),
+                                query: semanticQuerySummary(q),
+                                resultKeys,
+                                resultCount: Array.isArray(res) ? res.length : 0,
+                                status: 'success',
+                                backend: 'semantic',
+                                turnSeq: env.turn,
+                                agentId: ctx.agentId,
+                                source: 'loop.memory',
+                            });
+                        } catch (eventErr) {
+                            log.debug('Failed to append operator memory.read event', {
+                                error: eventErr instanceof Error ? eventErr.message : String(eventErr),
+                            });
+                        }
                         return Array.isArray(res) ? res.map(normalizeSemantic) : [];
                     }
                     const concepts = (mState as any)?.memory?.longTerm?.semantic?.concepts || [];
-                    if (!q || (!q.id && !q.tag && !q.tags)) return concepts;
+                    if (!q || (!q.id && !q.tag && !q.tags)) {
+                        try {
+                            await appendOperatorMemoryEvent(ctx, {
+                                op: 'read',
+                                keys: [],
+                                query: semanticQuerySummary(q),
+                                resultKeys: semanticResultKeys(concepts),
+                                resultCount: concepts.length,
+                                status: 'success',
+                                backend: 'semantic',
+                                turnSeq: env.turn,
+                                agentId: ctx.agentId,
+                                source: 'loop.memory',
+                            });
+                        } catch { /* noop */ }
+                        return concepts;
+                    }
                     const ids = q.id ? (Array.isArray(q.id) ? q.id : [q.id]) : undefined;
-                    return concepts.filter((c: any) => (!ids || ids.includes(c.id)));
+                    const filtered = concepts.filter((c: any) => (!ids || ids.includes(c.id)));
+                    try {
+                        await appendOperatorMemoryEvent(ctx, {
+                            op: 'read',
+                            keys: semanticReadKeys(q),
+                            query: semanticQuerySummary(q),
+                            resultKeys: semanticResultKeys(filtered),
+                            resultCount: filtered.length,
+                            status: 'success',
+                            backend: 'semantic',
+                            turnSeq: env.turn,
+                            agentId: ctx.agentId,
+                            source: 'loop.memory',
+                        });
+                    } catch { /* noop */ }
+                    return filtered;
                 },
                 get: async (id) => {
                     const res = await (semanticRegistry?.read ? semanticRegistry.read(id) : undefined);
+                    const resultKeys = semanticResultKeys(res);
+                    try {
+                        await appendOperatorMemoryEvent(ctx, {
+                            op: 'read',
+                            keys: [id],
+                            query: { id },
+                            resultKeys,
+                            resultCount: Array.isArray(res) ? res.length : 0,
+                            status: 'success',
+                            backend: 'semantic',
+                            turnSeq: env.turn,
+                            agentId: ctx.agentId,
+                            source: 'loop.memory',
+                        });
+                    } catch (eventErr) {
+                        log.debug('Failed to append operator memory.read event', {
+                            error: eventErr instanceof Error ? eventErr.message : String(eventErr),
+                        });
+                    }
                     if (Array.isArray(res) && res.length > 0) return normalizeSemantic(res[0]);
                     const concepts = (mState as any)?.memory?.longTerm?.semantic?.concepts || [];
                     return concepts.find((c: any) => c.id === id) || null;
@@ -161,7 +841,8 @@ export async function runLoop<
             rewardParamsReplace: undefined as import('./types.js').MentalState['rewardParams'] | undefined,
             plansReplace: undefined as import('../types/plan.js').PlanState | undefined,
             planUpserts: new Map<string, import('../types/plan.js').Plan>(),
-            planStepUpdates: new Map<string, { planId: string, stepId: string, patch: Partial<import('../types/plan.js').PlanStep> }>()
+            planStepUpdates: new Map<string, { planId: string, stepId: string, patch: Partial<import('../types/plan.js').PlanStep> }>(),
+            planFieldUpdates: new Map<string, Partial<import('../types/plan.js').Plan>>()
         };
 
         const writer: import('./types.js').MemoryWriter & {
@@ -212,7 +893,11 @@ export async function runLoop<
                 clear: (predicate) => {
                     const current = patches.goalsReplace;
                     if (current) {
-                        const nodes = Object.fromEntries(Object.entries(current.nodes).filter(([_, v]) => predicate ? predicate(v as any) : false));
+                        const nodes = Object.fromEntries(
+                            Object.entries(current.nodes).filter(([_, v]) =>
+                                predicate ? predicate(v) : false
+                            )
+                        );
                         const roots = current.roots.filter(r => !!nodes[r]);
                         patches.goalsReplace = { ...current, nodes, roots };
                     }
@@ -223,7 +908,12 @@ export async function runLoop<
                 add: (p: Plan) => { patches.planUpserts.set(p.id, p); },
                 update: (id: PlanId, patch: Partial<Plan>) => {
                     const current = patches.planUpserts.get(id);
-                    if (current) patches.planUpserts.set(id, { ...current, ...patch });
+                    if (current) {
+                        patches.planUpserts.set(id, { ...current, ...patch });
+                        return;
+                    }
+                    const prevPatch = patches.planFieldUpdates.get(id) ?? {};
+                    patches.planFieldUpdates.set(id, { ...prevPatch, ...patch });
                 },
                 updateStep: (planId: PlanId, stepId: string, patch: Partial<PlanStep>) => {
                     patches.planStepUpdates.set(`${planId}:${stepId}`, { planId, stepId, patch });
@@ -273,6 +963,16 @@ export async function runLoop<
                     });
                     (next as any).plans = { ...((next as any).plans || {}), plans };
                 }
+                if (patches.planFieldUpdates.size > 0) {
+                    const plans = { ...((next as any).plans?.plans || {}) };
+                    patches.planFieldUpdates.forEach((patch, planId) => {
+                        const plan = plans[planId];
+                        if (plan) {
+                            plans[planId] = { ...plan, ...patch };
+                        }
+                    });
+                    (next as any).plans = { ...((next as any).plans || {}), plans };
+                }
                 if (patches.policyParamsReplace) (next as any).policyParams = patches.policyParamsReplace;
                 if (patches.rewardParamsReplace) (next as any).rewardParams = patches.rewardParamsReplace;
                 return next;
@@ -284,17 +984,75 @@ export async function runLoop<
 
     const flushMemoryPatches = async (patches: ReturnType<ReturnType<typeof createMemoryWriter>['__drain']>) => {
         const semantic = (ctx as any).memory?.semantic;
-        if (semantic) {
+        const upsertCount = patches.semanticUpserts.size;
+        const deleteCount = patches.semanticDeletes.size;
+        const appendWriteEvents = async () => {
             try {
-                for (const [id, item] of patches.semanticUpserts.entries()) {
-                    await semantic.set?.(id, item.data ?? item, { tags: (item as any).tags, entities: (item as any).entities });
+                const writeKeys = [...patches.semanticUpserts.keys()];
+                if (writeKeys.length > 0) {
+                    await appendOperatorMemoryEvent(ctx, {
+                        op: 'write',
+                        keys: writeKeys,
+                        status: 'success',
+                        backend: 'semantic',
+                        turnSeq: env.turn,
+                        agentId: ctx.agentId,
+                        source: 'loop.memory',
+                    });
                 }
-                for (const id of patches.semanticDeletes.values()) {
-                    await semantic.delete?.(id);
+                const deleteKeys = [...patches.semanticDeletes.values()];
+                if (deleteKeys.length > 0) {
+                    await appendOperatorMemoryEvent(ctx, {
+                        op: 'delete',
+                        keys: deleteKeys,
+                        status: 'success',
+                        backend: 'semantic',
+                        turnSeq: env.turn,
+                        agentId: ctx.agentId,
+                        source: 'loop.memory',
+                    });
                 }
-            } catch (err) {
-                log.warn('Failed to flush semantic patches', { error: err instanceof Error ? err.message : String(err) });
+            } catch (eventErr) {
+                log.debug('Failed to append operator memory write/delete event', {
+                    error: eventErr instanceof Error ? eventErr.message : String(eventErr),
+                });
             }
+        };
+        if (!semantic || (upsertCount === 0 && deleteCount === 0)) {
+            await appendWriteEvents();
+            return;
+        }
+
+        const parentId = ctx.telemetry?.nodeId;
+        const parentNode = parentId ? telemetry.getNode(parentId) : undefined;
+        const traceId = parentNode?.traceId;
+        let memNode: WorkflowNode | undefined;
+        if (parentId) {
+            memNode = new WorkflowNode('memory.semantic.flush', parentId, undefined, traceId);
+            memNode.start({ upsertCount, deleteCount });
+            telemetry.registerNode(memNode);
+        }
+
+        try {
+            for (const [id, item] of patches.semanticUpserts.entries()) {
+                await semantic.set?.(id, item.data ?? item, { tags: (item as any).tags, entities: (item as any).entities });
+            }
+            for (const id of patches.semanticDeletes.values()) {
+                await semantic.delete?.(id);
+            }
+            if (memNode) {
+                memNode.end({ ok: true, upsertCount, deleteCount }, 'success');
+                telemetry.endNode(memNode);
+            }
+            await appendWriteEvents();
+        } catch (err) {
+            if (memNode) {
+                const er = err instanceof Error ? err : new Error(String(err));
+                memNode.fail(er);
+                telemetry.failNode(memNode, er);
+                telemetry.endNode(memNode);
+            }
+            log.warn('Failed to flush semantic patches', { error: err instanceof Error ? err.message : String(err) });
         }
         // Episodic/procedural/world/goals/policy/reward are persisted via MentalState snapshot
     };
@@ -308,17 +1066,42 @@ export async function runLoop<
 
             // Perception validation for plans
             turnInbox = turnInbox.map(obs => {
-                if (obs.source === 'internal' && (obs.kind === 'plan.proposed' || obs.kind === 'plan.updated')) {
-                    try {
-                        const validated = PlanSchema.parse(obs.payload);
-                        return { ...obs, payload: validated };
-                    } catch (err) {
-                        log.warn('Dropped invalid plan observation', { kind: obs.kind, error: err });
-                        return undefined;
+                if (obs.source !== 'internal') return obs;
+                if (obs.kind === 'plan.proposed' || obs.kind === 'plan.updated') {
+                    const parsed = PlanSchema.safeParse(obs.payload);
+                    if (parsed.success) {
+                        return { ...obs, payload: parsed.data };
                     }
+                    log.warn('Invalid plan observation replaced with validation.failed', {
+                        kind: obs.kind,
+                        schemaName: 'PlanSchema',
+                    });
+                    return planValidationFailedObservation(obs, 'PlanSchema', parsed.error);
+                }
+                if (obs.kind === 'plan.step.updated') {
+                    const parsed = PlanStepUpdatedPayloadSchema.safeParse(obs.payload);
+                    if (parsed.success) {
+                        return { ...obs, payload: parsed.data };
+                    }
+                    log.warn('Invalid plan observation replaced with validation.failed', {
+                        kind: obs.kind,
+                        schemaName: 'PlanStepUpdatedPayloadSchema',
+                    });
+                    return planValidationFailedObservation(obs, 'PlanStepUpdatedPayloadSchema', parsed.error);
+                }
+                if (obs.kind === 'plan.patch') {
+                    const parsed = PlanPatchPayloadSchema.safeParse(obs.payload);
+                    if (parsed.success) {
+                        return { ...obs, payload: parsed.data };
+                    }
+                    log.warn('Invalid plan observation replaced with validation.failed', {
+                        kind: obs.kind,
+                        schemaName: 'PlanPatchSchema',
+                    });
+                    return planValidationFailedObservation(obs, 'PlanPatchSchema', parsed.error);
                 }
                 return obs;
-            }).filter((o): o is NonNullable<typeof o> => !!o);
+            });
 
             // Default perception returns inbox observations
             return { time: e.time, pending: e.pending, inbox: turnInbox } as any;
@@ -334,22 +1117,90 @@ export async function runLoop<
                 ((next as any).memory.longTerm as any).episodic = episodic;
                 (writer as any).episodic?.append?.(event);
 
+                const inboxArr = Array.isArray((obs as { inbox?: Observation[] }).inbox)
+                    ? (obs as { inbox: Observation[] }).inbox
+                    : [];
+                (next as MentalState).memory = (next as MentalState).memory ?? ({} as MentalState['memory']);
+                (next as MentalState).memory.conversation = reduceConversationProjection(
+                    (next as MentalState).memory.conversation,
+                    inboxArr
+                );
+
                 // Learning: Single Writer for M.plans
-                const internal = (obs as any).internal?.();
-                if (internal) {
-                    const kind = internal.kind;
-                    const payload = internal.payload;
-                    if (kind === 'plan.proposed') {
-                        (writer as any).plans?.set?.({
-                            plans: { [payload.id]: payload },
-                            activePlanId: payload.id
+                const inboxForPlans = inboxArr.length > 0 ? inboxArr : inboxFromPerceptionObs(obs);
+                for (const item of inboxForPlans) {
+                    if (item.source !== 'internal') continue;
+                    if (item.kind === 'plan.proposed') {
+                        const parsed = PlanSchema.safeParse(item.payload);
+                        if (!parsed.success) continue;
+                        const stamped = stampPlanTimestamps(parsed.data);
+                        writer.plans.set({
+                            plans: { [stamped.id]: stamped },
+                            activePlanId: stamped.id,
                         });
-                    } else if (kind === 'plan.updated') {
-                        (writer as any).plans?.add?.(payload);
-                    } else if (kind === 'plan.step.updated') {
-                        // payload would need to include planId and stepId and the patch
-                        const { planId, stepId, ...patch } = payload;
-                        (writer as any).plans?.updateStep?.(planId, stepId, patch);
+                    } else if (item.kind === 'plan.updated') {
+                        const parsed = PlanSchema.safeParse(item.payload);
+                        if (!parsed.success) continue;
+                        const stamped = stampPlanTimestamps(parsed.data);
+                        writer.plans.add?.(stamped);
+                    } else if (item.kind === 'plan.step.updated') {
+                        const parsed = PlanStepUpdatedPayloadSchema.safeParse(item.payload);
+                        if (!parsed.success) continue;
+                        const { planId, stepId, patch, advanceCursor } = parsed.data;
+                        const currentPlan = (prev as MentalState<Sensory>).plans?.plans?.[planId];
+                        if (!currentPlan) continue;
+                        const nextPlan: Plan = {
+                            ...currentPlan,
+                            steps: currentPlan.steps.map((s: PlanStep) =>
+                                s.id === stepId ? { ...s, ...patch } : s
+                            ),
+                        };
+                        const validated = PlanSchema.safeParse(nextPlan);
+                        if (!validated.success) continue;
+                        writer.plans.updateStep?.(planId, stepId, patch);
+                        if (advanceCursor === true) {
+                            maybeAdvancePlanCursor(writer, prev as MentalState<Sensory>, planId, stepId);
+                        }
+                    } else if (item.kind === 'plan.patch') {
+                        const parsed = PlanPatchPayloadSchema.safeParse(item.payload);
+                        if (!parsed.success) continue;
+                        const { planId, patch } = parsed.data;
+                        const currentPlan = (prev as MentalState<Sensory>).plans?.plans?.[planId];
+                        if (!currentPlan) continue;
+                        const applied = applyPlanPatch(currentPlan, patch);
+                        if (!applied.ok) continue;
+                        const bumped: Plan = {
+                            ...applied.plan,
+                            revision: applied.plan.revision + 1,
+                            lineage: {
+                                ...(applied.plan.lineage ?? {}),
+                                parentRevision: applied.plan.revision,
+                            },
+                            updatedAt: new Date().toISOString(),
+                        };
+                        const validated = PlanSchema.safeParse(bumped);
+                        if (!validated.success) continue;
+                        writer.plans.add?.(validated.data);
+                    }
+                }
+
+                for (const item of inboxForPlans) {
+                    if (!isTerminalEffectObservation(item)) continue;
+                    const token = isRecord(item.payload) && typeof item.payload.token === 'string'
+                        ? item.payload.token
+                        : undefined;
+                    const slot = pendingSlotForObservation(item.source);
+                    if (!token || !slot) continue;
+                    const record = lookupPendingPlanStep(env, slot, token);
+                    if (!record) {
+                        continue;
+                    }
+                    const failed = item.kind.endsWith('.failed') || item.kind === 'input.cancelled';
+                    writer.plans.updateStep?.(record.planId, record.stepId, {
+                        status: failed ? 'failed' : 'completed',
+                    });
+                    if (record.advanceCursor === true) {
+                        maybeAdvancePlanCursor(writer, prev as MentalState<Sensory>, record.planId, record.stepId);
                     }
                 }
             } catch { /* noop */ }
@@ -385,81 +1236,114 @@ export async function runLoop<
         }),
         shield: modules.shield ?? ((m, a, _mem) => {
             try {
-                const level = (m as any)?.hitl || (m as any)?.policyParams?.hitl;
-                const safety = (m as any)?.safety || {};
-                if (!level) return { action: 'pass', intent: a } as any;
-                // guardrails: block tools/subagents without explicit consent
-                if (level === 'guardrails' && (a as any)?.kind && ((a as any).kind === 'call_tool' || (a as any).kind === 'delegate_to_child')) {
-                    (m as any).lastAdvise = { kind: (a as any).kind, policy: 'guardrails' };
-                    return { action: 'defer', askUser: 'Approve action?' } as any;
+                const mWithHitl = m as MentalState & {
+                    hitl?: string;
+                    policyParams?: { hitl?: string };
+                    safety?: { costLimit?: number; piiPatterns?: string[] };
+                    lastAdvise?: unknown;
+                };
+                const level = iCtx.__manifestHitl?.level ?? mWithHitl.hitl ?? mWithHitl.policyParams?.hitl;
+                const safety = mWithHitl.safety ?? {};
+                if (!level) return { action: 'pass', intent: a };
+                if (level === 'guardrails' && (a.kind === 'call_tool' || a.kind === 'delegate_to_child')) {
+                    mWithHitl.lastAdvise = { kind: a.kind, policy: 'guardrails' };
+                    return { action: 'defer', askUser: 'Approve action?' };
                 }
-                // consent: ask user before tools
-                if (level === 'consent' && (a as any)?.kind === 'call_tool') {
-                    (m as any).lastAdvise = { kind: (a as any).kind, tool: (a as any).toolName, toolArgs: (a as any).args, policy: 'consent' };
-                    return { action: 'defer', askUser: `Run tool ${(a as any).toolName}?` } as any;
+                if (level === 'consent' && a.kind === 'call_tool') {
+                    mWithHitl.lastAdvise = { kind: a.kind, tool: a.toolName, toolArgs: a.args, policy: 'consent' };
+                    return { action: 'defer', askUser: `Run tool ${a.toolName}?` };
                 }
-                // cost limit: if action declares cost in args, block if above threshold
-                try {
-                    const cost = Number(((a as any)?.args?.cost) ?? 0);
+                if (a.kind === 'call_tool') {
+                    const cost = Number((isRecord(a.args) ? a.args.cost : 0) ?? 0);
                     if (Number.isFinite(cost) && typeof safety.costLimit === 'number' && cost > safety.costLimit) {
-                        (m as any).lastAdvise = { blocked: 'cost', cost, limit: safety.costLimit };
-                        return { action: 'defer', askUser: `Action cost ${cost} exceeds limit ${safety.costLimit}. Proceed?` } as any;
+                        mWithHitl.lastAdvise = { blocked: 'cost', cost, limit: safety.costLimit };
+                        return { action: 'defer', askUser: `Action cost ${cost} exceeds limit ${safety.costLimit}. Proceed?` };
                     }
-                } catch { /* noop */ }
-                // PII patterns: if args contain strings matching any configured pattern, prompt
-                try {
-                    const patterns: string[] = Array.isArray(safety.piiPatterns) ? safety.piiPatterns : [];
-                    if (patterns.length > 0) {
-                        const regexes = patterns.map(p => new RegExp(p, 'i'));
-                        // Helper to recursively check objects/arrays
-                        const scanForPII = (v: any): boolean => {
-                            if (typeof v === 'string') return regexes.some(r => r.test(v));
-                            if (Array.isArray(v)) return v.some(scanForPII);
-                            if (v && typeof v === 'object') return Object.values(v).some(scanForPII);
-                            return false;
-                        };
-                        const containsPII = scanForPII((a as any)?.args);
-                        if (containsPII) {
-                            (m as any).lastAdvise = { flagged: 'pii' };
-                            return { action: 'defer', askUser: `Action contains potential PII. Proceed?` } as any;
-                        }
-                    }
-                } catch { /* noop */ }
-                // advise: allow but could tag; default pass-through here
-                if (level === 'advise') {
-                    (m as any).lastAdvise = { kind: (a as any).kind, policy: 'advise' };
                 }
-                return { action: 'pass', intent: a } as any;
-            } catch { return { action: 'pass', intent: a } as any; }
+                const patterns = Array.isArray(safety.piiPatterns) ? safety.piiPatterns : [];
+                if (patterns.length > 0 && a.kind === 'call_tool') {
+                    const regexes = patterns.map((p) => new RegExp(p, 'i'));
+                    const scanForPII = (value: unknown): boolean => {
+                        if (typeof value === 'string') return regexes.some((r) => r.test(value));
+                        if (Array.isArray(value)) return value.some(scanForPII);
+                        if (isRecord(value)) return Object.values(value).some(scanForPII);
+                        return false;
+                    };
+                    if (scanForPII(a.args)) {
+                        mWithHitl.lastAdvise = { flagged: 'pii' };
+                        return { action: 'defer', askUser: 'Action contains potential PII. Proceed?' };
+                    }
+                }
+                if (level === 'advise') {
+                    mWithHitl.lastAdvise = { kind: a.kind, policy: 'advise' };
+                }
+                return { action: 'pass', intent: a };
+            } catch {
+                return { action: 'pass', intent: a };
+            }
         }),
-        execution: modules.execution ?? (async (a: any, ctx: any, _mem) => {
-            const kind = (a as any).kind;
-            const base: ExecResult = { status: 'ok', ts: Date.now() };
+        execution: modules.execution ?? (async (policyIntent: Intent, ctx: TaskContext, _mem, mState?: MentalState<Sensory>) => {
+            let a: Intent = policyIntent;
+            let planStamp: PlanStepStamp | undefined;
+            if (policyIntent.kind === 'execute_step' || policyIntent.kind === 'execute_next_step') {
+                const resolved = resolveStoredPlanStep(policyIntent, mState ?? ({} as MentalState<Sensory>));
+                if (!resolved.ok) {
+                    return {
+                        action: { kind: 'internal', done: false } as ExecutableAction,
+                        result: {
+                            status: 'error',
+                            ts: Date.now(),
+                            error: { code: resolved.errorCode, message: resolved.message },
+                            data: { planDispatchFailed: true },
+                            toolId: 'internal',
+                        },
+                    };
+                }
+                planStamp = {
+                    planId: resolved.planId,
+                    stepId: resolved.stepId,
+                    advanceCursor: resolved.advanceCursor,
+                };
+                if (resolved.intent.kind === 'call_tool') {
+                    a = { ...resolved.intent, mode: 'async' };
+                } else {
+                    a = resolved.intent;
+                }
+            }
 
-            if (kind === 'prompt_user') {
-                const handle = await (ctx as any).requestInput((a as any).prompt, {
-                    schema: (a as any).schema,
-                    onProvided: '__onInputProvided'
+            const base: ExecResult = { status: 'ok', ts: Date.now() };
+            const internalCtx = ctx as InternalTaskContext & {
+                flushSnapshot?: (state: { M: MentalState<Sensory>; env: EnvironmentState }) => Promise<void>;
+            };
+
+            const stampOpts = asHandlerStampOpts(planStamp);
+
+            const outcome = await (async (): Promise<ExecOutcome> => {
+
+            if (a.kind === 'prompt_user') {
+                const handle = await ctx.requestInput(a.prompt, {
+                    schema: a.schema,
+                    onProvided: '__onInputProvided',
+                    ...stampOpts,
                 });
-                const token = (handle as any)?.token || '';
-                try { log.info('Execution asking for user input', { token }); } catch { }
+                const token = isRecord(handle) && typeof handle.token === 'string' ? handle.token : '';
+                try { log.info('Execution asking for user input', { token }); } catch { /* noop */ }
                 return {
                     action: { kind: 'prompt_user', token } as ExecutableAction,
                     result: {
                         ...base,
-                        data: { prompt: (a as any).prompt },
+                        data: { prompt: a.prompt },
                         correlationId: token || undefined,
                         toolId: 'user'
                     }
                 };
             }
 
-            if (kind === 'delegate_to_child') {
-                // FLUSH BEFORE DISPATCH: Ensure DB has current state (including M) so child creation (which loads parent) sees valid data.
-                if (typeof (ctx as any).flushSnapshot === 'function') {
+            if (a.kind === 'delegate_to_child') {
+                if (typeof internalCtx.flushSnapshot === 'function') {
                     try {
-                        log.debug('LoopRunner: calling flushSnapshot before subagent', { toolId: (a as any).agentId });
-                        await (ctx as any).flushSnapshot({ M, env });
+                        log.debug('LoopRunner: calling flushSnapshot before subagent', { toolId: a.agentId });
+                        await internalCtx.flushSnapshot({ M, env });
                     } catch (e) {
                         log.warn('Failed to flush snapshot before subagent dispatch', { error: (e as Error).message });
                     }
@@ -467,30 +1351,31 @@ export async function runLoop<
                     log.warn('LoopRunner: flushSnapshot not available on context for subagent dispatch');
                 }
 
-                const res = await (ctx as any).sendTaskToAgent((a as any).agentId, (a as any).input, {
-                    onCompleted: '__onChildCompleted'
+                const res = await ctx.sendTaskToAgent(a.agentId, a.input as TaskInput, {
+                    onCompleted: '__onChildCompleted',
+                    ...stampOpts,
                 });
-                const token = (res as any)?.token || (res as any)?.childToken;
+                const token = isRecord(res)
+                    ? (typeof res.token === 'string' ? res.token : undefined)
+                    : undefined;
                 if (token) {
                     return {
                         action: { kind: 'delegate_to_child', token } as ExecutableAction,
-                        result: { ...base, correlationId: token, toolId: (a as any).agentId }
+                        result: { ...base, correlationId: token, toolId: a.agentId }
                     };
                 }
                 return {
                     action: { kind: 'delegate_to_child' } as ExecutableAction,
-                    result: { ...base, data: res, toolId: (a as any).agentId }
+                    result: { ...base, data: res, toolId: a.agentId }
                 };
             }
 
-            if (kind === 'call_tool') {
-                const toolName = (a as any).toolName;
-
-                // FLUSH BEFORE TOOL: Some tools might inspect agent state via DB or side-channels
-                if (typeof (ctx as any).flushSnapshot === 'function') {
+            if (a.kind === 'call_tool') {
+                const toolName = a.toolName;
+                if (typeof internalCtx.flushSnapshot === 'function') {
                     try {
                         log.debug('LoopRunner: calling flushSnapshot before tool', { toolId: toolName });
-                        await (ctx as any).flushSnapshot({ M, env });
+                        await internalCtx.flushSnapshot({ M, env });
                     } catch (e) {
                         log.warn('Failed to flush snapshot before tool execution', { error: (e as Error).message });
                     }
@@ -498,18 +1383,19 @@ export async function runLoop<
                     log.debug('LoopRunner: flushSnapshot not available on context for tool execution', { toolId: toolName });
                 }
 
-                if ((a as any).mode === 'async') {
-                    const handle = await (ctx as any).requestTool(toolName, (a as any).args, {
-                        onCompleted: '__onToolCompleted'
+                if (a.mode === 'async') {
+                    const handle = await ctx.requestTool(toolName, a.args, {
+                        onCompleted: '__onToolCompleted',
+                        ...stampOpts,
                     });
-                    const token = (handle as any)?.token || '';
+                    const token = isRecord(handle) && typeof handle.token === 'string' ? handle.token : '';
                     return {
                         action: { kind: 'call_tool', token } as ExecutableAction,
                         result: { ...base, correlationId: token || undefined, toolId: toolName }
                     };
                 }
                 try {
-                    const result = await (ctx as any).tools.invoke(toolName, (a as any).args);
+                    const result = await ctx.tools.invoke(toolName, a.args);
                     return {
                         action: { kind: 'call_tool' } as ExecutableAction,
                         result: { ...base, data: result, toolId: toolName }
@@ -530,28 +1416,71 @@ export async function runLoop<
                 }
             }
 
-            if (kind === 'answer_with_llm') {
-                await (ctx as any).reply((a as any).query);
+            if (a.kind === 'answer_with_llm') {
+                const llmConfigured = internalCtx.__llmConfigured === true || typeof ctx.llm?.getHistoryMode === 'function';
+                if (!llmConfigured) {
+                    await ctx.reply(a.query);
+                    return {
+                        action: { kind: 'answer_with_llm', echoed: true } as ExecutableAction,
+                        result: {
+                            ...base,
+                            status: 'error',
+                            error: {
+                                code: 'llm_not_configured',
+                                message: 'No LLM configured; echoed query as fallback.'
+                            },
+                            data: { echoed: true, query: a.query, text: a.query },
+                            toolId: 'language'
+                        }
+                    };
+                }
+
+                const responses = await ctx.llm.call(a.query);
+                const text = typeof responses[0]?.content === 'string' ? responses[0].content : 'No LLM response.';
+                await ctx.reply(text);
                 return {
-                    action: { kind: 'answer_with_llm', echoed: true } as ExecutableAction,
-                    result: { ...base, data: { echoed: true, query: (a as any).query }, toolId: 'language' }
+                    action: { kind: 'answer_with_llm', echoed: false } as ExecutableAction,
+                    result: { ...base, data: { echoed: false, query: a.query, text }, toolId: 'language' }
                 };
             }
 
-            if (kind === 'create_plan') {
-                // Placeholder: In a real agent, this would use an LLM or planner
+            if (a.kind === 'create_plan') {
                 return {
-                    action: { kind: 'internal' } as ExecutableAction,
-                    result: { ...base, data: { planProposed: { id: `plan_${Date.now()}`, goalId: (a as any).goalId, steps: [], status: 'proposed' } }, toolId: 'internal' }
+                    action: { kind: 'internal', done: false } as ExecutableAction,
+                    result: {
+                        ...base,
+                        data: { planProposed: { id: `plan_${Date.now()}`, goalId: a.goalId, steps: [], status: 'proposed' } },
+                        toolId: 'internal'
+                    }
+                };
+            }
+
+            if (a.kind === 'internal') {
+                const maybeDone = a as unknown as Record<string, unknown>;
+                const legacyDone = typeof maybeDone.done === 'boolean' ? maybeDone.done : false;
+                return {
+                    action: { kind: 'internal', done: legacyDone } as ExecutableAction,
+                    result: { ...base, data: { intent: a.intent, done: legacyDone }, toolId: 'internal' }
+                };
+            }
+
+            if (a.kind === 'complete') {
+                return {
+                    action: { kind: 'internal', done: true } as ExecutableAction,
+                    result: { ...base, data: { intent: 'complete', done: true, result: a.result }, toolId: 'internal' }
                 };
             }
 
             return {
-                action: { kind: 'internal', done: (a as any).done || false } as ExecutableAction,
-                result: { ...base, data: { intent: (a as any).intent, done: (a as any).done || false }, toolId: 'internal' }
+                action: { kind: 'internal', done: false } as ExecutableAction,
+                result: { ...base, data: { intent: a.kind, done: false }, toolId: 'internal' }
             };
+            })();
+            const typedOutcome = outcome as ExecOutcome<ExecData, ExecError>;
+            if (!planStamp) return typedOutcome;
+            return attachPlanStepCorrelation(typedOutcome, env, planStamp, a);
         }),
-        transition: modules.transition ?? ((env, exec, _m, _mem) => {
+        transition: modules.transition ?? ((env, exec: ExecOutcome<ExecData, ExecError>, _m, _mem) => {
             const { action, result } = exec;
 
             if (result.status === 'ok') {
@@ -581,29 +1510,38 @@ export async function runLoop<
                     }
                 }
 
-                if (action.kind === 'internal' && (action as any).done === true) {
-                    return { kind: 'complete', observations: [] as Observation[] } as TransitionOut;
+                const pendingEvents = env.pending?.events;
+                if (pendingEvents && typeof pendingEvents === 'object') {
+                    const tokens = Object.keys(pendingEvents);
+                    if (tokens.length > 0) {
+                        const firstToken = tokens[0];
+                        try { log.info('Default transition: detected pending external event, returning await_event', { token: firstToken?.substring(0, 15), totalPending: tokens.length }); } catch { }
+                        return { kind: 'await_event', token: firstToken } as TransitionOut;
+                    }
+                }
+
+                if (action.kind === 'internal' && action.done === true) {
+                    return { kind: 'complete' } as TransitionOut;
                 }
 
                 // Planning transitions
-                const data = result.data as any;
+                const data = result.data;
                 const obs: Observation[] = [];
-                if (data?.planProposed) {
-                    obs.push({ source: 'internal', kind: 'plan.proposed', payload: data.planProposed });
+                if (result.toolId === 'language') {
+                    const payload = LLMRespondedPayloadSchema.parse({
+                        hasStructuredOutput: isRecord(data) ? data.echoed === false : false,
+                        contentSummary: isRecord(data) && typeof data.text === 'string' ? data.text.slice(0, 240) : undefined,
+                    });
+                    obs.push({ source: 'internal', kind: 'llm.responded', payload });
                 }
-                if (data?.planUpdated) {
-                    obs.push({ source: 'internal', kind: 'plan.updated', payload: data.planUpdated });
-                }
-                if (data?.planStepUpdated) {
-                    obs.push({ source: 'internal', kind: 'plan.step.updated', payload: data.planStepUpdated });
-                }
+                pushPlanningDataObservations(obs, data);
 
                 if (obs.length === 0) {
                     obs.push({
                         source: 'internal',
                         kind: 'state.noted',
                         payload: {
-                            intent: (action as any).intent || action.kind,
+                            intent: action.kind,
                             reason: 'continue_implicit'
                         }
                     });
@@ -613,8 +1551,24 @@ export async function runLoop<
 
             }
 
-            // Error path
-            return { kind: 'continue', observations: [] as Observation[] } as TransitionOut;
+            const obs: Observation[] = [];
+            pushPlanningDataObservations(obs, result.data);
+            const errorCode = result.error?.code;
+            if (errorCode === 'schema_mismatch' || errorCode === 'contract_failed' || errorCode === 'llm_not_configured') {
+                const payload = ValidationFailedPayloadSchema.parse({
+                    reason: errorCode === 'llm_not_configured' ? 'llm_not_configured' : 'llm_contract_failed',
+                    error: result.error,
+                });
+                obs.push({ source: 'internal', kind: 'validation.failed', payload });
+            }
+            if (typeof errorCode === 'string' && errorCode.startsWith('PLAN_')) {
+                obs.push({
+                    source: 'internal',
+                    kind: 'state.noted',
+                    payload: { error: result.error },
+                });
+            }
+            return { kind: 'continue', observations: obs } as TransitionOut;
         }),
         extrinsicReward: modules.extrinsicReward ?? ((m, _a, _exec, _out) => {
             try {
@@ -688,7 +1642,60 @@ export async function runLoop<
         loopWillRun: maxTurns > 0
     });
 
-    for (let turnIdx = 0; turnIdx < maxTurns; turnIdx++) {
+    const topicSweeperOpts = opts.topicSweeper;
+    const tenantIdForSweep = typeof ctx.tenantId === 'string' && ctx.tenantId.length > 0 ? ctx.tenantId : undefined;
+    type TopicSweeperEngineHandle = {
+        triggerTopicLifecycleSweep?: (p: {
+            tenantId: string;
+            nowIso?: string;
+            limit?: number;
+            autoArchiveAfterMs?: number | null;
+        }) => Promise<{ archivedTopicIds: string[] }>;
+    };
+    let topicSweeperEngine: TopicSweeperEngineHandle | null = null;
+    /** `0` means "due immediately" on the first check between turns. */
+    let nextTopicSweepDueAt = 0;
+    if (
+        topicSweeperOpts &&
+        topicSweeperOpts.intervalMs > 0 &&
+        topicSweeperOpts.autoArchiveAfterMs > 0 &&
+        tenantIdForSweep
+    ) {
+        const eng = EngineLocator.getEngine<TopicSweeperEngineHandle>();
+        if (eng?.triggerTopicLifecycleSweep) {
+            topicSweeperEngine = eng;
+            nextTopicSweepDueAt = 0;
+        } else {
+            log.debug('Topic sweeper schedule skipped: no TaskEngine with triggerTopicLifecycleSweep on EngineLocator', {
+                taskId,
+            });
+        }
+    }
+
+    const runTopicSweeperIfDue = async (): Promise<void> => {
+        if (!topicSweeperOpts || !tenantIdForSweep || !topicSweeperEngine?.triggerTopicLifecycleSweep) {
+            return;
+        }
+        const now = Date.now();
+        if (nextTopicSweepDueAt !== 0 && now < nextTopicSweepDueAt) {
+            return;
+        }
+        try {
+            await topicSweeperEngine.triggerTopicLifecycleSweep({
+                tenantId: tenantIdForSweep,
+                limit: topicSweeperOpts.batchSize,
+                autoArchiveAfterMs: topicSweeperOpts.autoArchiveAfterMs,
+            });
+        } catch (e) {
+            log.warn('Topic lifecycle sweep tick failed', {
+                error: e instanceof Error ? e.message : String(e),
+                tenantId: tenantIdForSweep,
+            });
+        }
+        nextTopicSweepDueAt = Date.now() + topicSweeperOpts.intervalMs;
+    };
+
+    for (let turnIdx = 0; turnIdx < executionTurnLimit; turnIdx++) {
         // ✅ FIX: Only increment turn if this is NOT the first iteration of this loop call.
         // The first turn count is now incremented by TaskExecutor before initialization.
         if (turnIdx > 0) {
@@ -701,6 +1708,7 @@ export async function runLoop<
             console.log(`[runLoop] Iteration ${turnIdx}: env.turn=${(env as any).turn}, turn scope variable=${turn}`);
         }
 
+        await runTopicSweeperIfDue();
 
         // Update logging context with current turn number
         updateLoggingContext({ turn });
@@ -749,8 +1757,9 @@ export async function runLoop<
                 // If we also make a node, we get nested turns: Execution -> Turn X. This is desired.
 
                 const parentId = OuterTurnNodeId || ctx.telemetry?.nodeId;
-                const parentNode = telemetry.getNode(parentId);
-                const traceId = parentNode?.traceId;
+                const parentNode = parentId ? telemetry.getNode(parentId) : undefined;
+                const traceId =
+                    parentNode?.traceId ?? resolveTraceIdForTurnParent(parentId, ctx);
                 iterationTurnNode = new TurnNode(turnIndex, parentId, undefined, traceId);
 
                 // Track input for this specific turn (the inbox contents)
@@ -772,10 +1781,39 @@ export async function runLoop<
                 iCtxTurn.__turnLlmCalls = [];
                 iCtxTurn.__turnToolCalls = [];
                 iCtxTurn.__turnChildCalls = [];
+                iCtxTurn.__turnIncomingConversationMessages = [];
+                iCtxTurn.__turnOutgoingConversationMessages = [];
+                iCtxTurn.__turnConversationSummary = undefined;
+                iCtxTurn.__turnConversationSequenceNumber = undefined;
+                iCtxTurn.__turnConversationDedupeHit = undefined;
+                iCtxTurn.__turnConversationDeliveryLagMs = undefined;
+                iCtxTurn.__turnTopicSelectorDecision = undefined;
+                iCtxTurn.__turnFanoutSummary = undefined;
+                iCtxTurn.__turnStopPolicy = undefined;
+                iCtxTurn.__turnBackpressure = undefined;
+                iCtxTurn.__turnInviteAutoJoin = {};
+                iCtxTurn.__operatorMemoryEvent = (event) =>
+                    appendOperatorMemoryEvent(ctx, {
+                        ...event,
+                        turnSeq: event.turnSeq ?? env.turn,
+                        agentId: event.agentId ?? ctx.agentId,
+                    });
+
+                await appendOperatorTurnStartedEvent(
+                    ctx,
+                    turnIndex,
+                    iterationTurnNode.id,
+                    traceId,
+                    iterationTurnNode.id
+                );
             } catch (err) {
                 log.warn('Failed to start iteration TurnNode', { error: err });
             }
             // -----------------------
+
+            if (opts.autoJoinInvitedTopics === true) {
+                await runDefaultAutoJoinInvitedTopics({ ctx, env, iCtx });
+            }
 
             const memReader = createMemoryReader(m);
             const writer = createMemoryWriter();
@@ -827,6 +1865,20 @@ export async function runLoop<
 
             outcome = step.outcome;
 
+            const consumedConversationMessageKeys: ReadonlySet<string> = new Set(
+                (iCtx.__turnIncomingConversationMessages ?? []).map((msg) =>
+                    conversationInboxDeliveryKeyFromTurnSummary(msg)
+                )
+            );
+            if (consumedConversationMessageKeys.size > 0) {
+                const accumulated =
+                    iCtx.__conversationConsumedDeliveryKeys ?? new Set<string>();
+                for (const key of consumedConversationMessageKeys) {
+                    accumulated.add(key);
+                }
+                iCtx.__conversationConsumedDeliveryKeys = accumulated;
+            }
+
             const totalMs =
                 (step.timings?.attentionMs ?? 0) +
                 (step.timings?.perceptionMs ?? 0) +
@@ -847,26 +1899,135 @@ export async function runLoop<
             };
             const stageBefore = step.stageTrace?.stageBefore ?? 'idle';
             const stageAfter = step.stageTrace?.stageAfter ?? stageBefore;
-            const turnId = uuidv4();
+            const turnId = iterationTurnNode?.id ?? uuidv7();
             const correlationId = generateCorrelationId();
-            const parentNode = iterationTurnNode
-                ? telemetry.getNode(iterationTurnNode.parentId ?? '')
-                : undefined;
-            const traceId = iterationTurnNode?.traceId ?? parentNode?.traceId ?? undefined;
+            const parentNode =
+                iterationTurnNode?.parentId != null && iterationTurnNode.parentId !== ''
+                    ? telemetry.getNode(iterationTurnNode.parentId)
+                    : undefined;
+            const traceId =
+                iterationTurnNode?.traceId ??
+                parentNode?.traceId ??
+                resolveTraceIdForTurnParent(iterationTurnNode?.parentId, ctx);
             const spanId = iterationTurnNode?.id ?? undefined;
 
-            const usage = iCtx.__turnUsage
-                ? { ...iCtx.__turnUsage }
-                : undefined;
-            if (iCtx.__turnLlmCalls?.length && usage) {
-                usage.llmCalls = iCtx.__turnLlmCalls.length;
+            const usage = usageFromTurnCalls(iCtx);
+
+            const inviteIssued: Array<{
+                token: string;
+                topicId: string;
+                inviteeAgentId: string;
+                expiresAt: string;
+            }> = [];
+            const inviteReceived: Array<{
+                token: string;
+                topicId: string;
+                inviterAgentId: string;
+                expiresAt: string;
+                autoJoinAttempted: boolean;
+                autoJoinError?: {
+                    type:
+                        | 'InviteNotFound'
+                        | 'InviteExpired'
+                        | 'InviteAlreadyConsumed'
+                        | 'InviteTargetMismatch';
+                    message: string;
+                };
+            }> = [];
+            const inviteAccepted: Array<{
+                token: string;
+                topicId: string;
+                memberId: string;
+                agentId: string;
+            }> = [];
+            const inviteDeclined: Array<{
+                token: string;
+                topicId: string;
+                inviteeAgentId: string;
+                reason?: string;
+            }> = [];
+            const inviteExpired: Array<{
+                token: string;
+                topicId: string;
+                inviteeAgentId: string;
+                expiresAt: string;
+            }> = [];
+            for (const obs of env.inbox.current) {
+                if (obs.source !== 'conversation') continue;
+                const payload = (obs as { payload?: Record<string, unknown> }).payload;
+                const kind = asString(payload?.kind);
+                if (!kind) continue;
+                if (kind === 'topic.invite.issued') {
+                    const topic = payload?.topic as Record<string, unknown> | undefined;
+                    const invitee = payload?.invitee as Record<string, unknown> | undefined;
+                    const token = asString(payload?.token);
+                    const topicId = asString(topic?.id);
+                    const inviteeAgentId = asString(invitee?.agentId);
+                    const expiresAt = asString(payload?.expiresAt);
+                    if (token && topicId && inviteeAgentId && expiresAt) {
+                        inviteIssued.push({ token, topicId, inviteeAgentId, expiresAt });
+                    }
+                } else if (kind === 'topic.invite.received') {
+                    const topic = payload?.topic as Record<string, unknown> | undefined;
+                    const token = asString(payload?.token);
+                    const topicId = asString(topic?.id);
+                    const inviterAgentId = asString(payload?.inviterAgentId);
+                    const expiresAt = asString(payload?.expiresAt);
+                    if (token && topicId && inviterAgentId && expiresAt) {
+                        const autoJoin = iCtx.__turnInviteAutoJoin?.[token];
+                        inviteReceived.push({
+                            token,
+                            topicId,
+                            inviterAgentId,
+                            expiresAt,
+                            autoJoinAttempted: autoJoin?.attempted === true,
+                            autoJoinError: autoJoin?.error,
+                        });
+                    }
+                } else if (kind === 'topic.invite.accepted') {
+                    const topic = payload?.topic as Record<string, unknown> | undefined;
+                    const member = payload?.member as Record<string, unknown> | undefined;
+                    const token = asString(payload?.token);
+                    const topicId = asString(topic?.id);
+                    const memberId = asString(member?.memberId);
+                    const agentId = asString(member?.agentId);
+                    if (token && topicId && memberId && agentId) {
+                        inviteAccepted.push({ token, topicId, memberId, agentId });
+                    }
+                } else if (kind === 'topic.invite.declined') {
+                    const topic = payload?.topic as Record<string, unknown> | undefined;
+                    const token = asString(payload?.token);
+                    const topicId = asString(topic?.id);
+                    const inviteeAgentId = asString(payload?.inviteeAgentId);
+                    const reason = asString(payload?.reason);
+                    if (token && topicId && inviteeAgentId) {
+                        inviteDeclined.push({ token, topicId, inviteeAgentId, reason });
+                    }
+                } else if (kind === 'topic.invite.expired') {
+                    const topic = payload?.topic as Record<string, unknown> | undefined;
+                    const token = asString(payload?.token);
+                    const topicId = asString(topic?.id);
+                    const inviteeAgentId = asString(payload?.inviteeAgentId);
+                    const expiresAt = asString(payload?.expiresAt);
+                    if (token && topicId && inviteeAgentId && expiresAt) {
+                        inviteExpired.push({ token, topicId, inviteeAgentId, expiresAt });
+                    }
+                }
             }
-            if (iCtx.__turnToolCalls?.length && usage) {
-                usage.toolCalls = iCtx.__turnToolCalls.length;
-            }
-            if (iCtx.__turnChildCalls?.length && usage) {
-                usage.childCalls = iCtx.__turnChildCalls.length;
-            }
+            const inviteDelivery =
+                inviteIssued.length > 0 ||
+                inviteReceived.length > 0 ||
+                inviteAccepted.length > 0 ||
+                inviteDeclined.length > 0 ||
+                inviteExpired.length > 0
+                    ? {
+                          issued: inviteIssued.length > 0 ? inviteIssued : undefined,
+                          received: inviteReceived.length > 0 ? inviteReceived : undefined,
+                          accepted: inviteAccepted.length > 0 ? inviteAccepted : undefined,
+                          declined: inviteDeclined.length > 0 ? inviteDeclined : undefined,
+                          expired: inviteExpired.length > 0 ? inviteExpired : undefined,
+                      }
+                    : undefined;
 
             const tracePayload: TurnTrace = {
                 turn,
@@ -891,6 +2052,7 @@ export async function runLoop<
                 mentalStateAfterHash: step.mentalStateAfterHash,
                 intent: step.intent,
                 shield: step.shield,
+                manifestConsent: step.manifestConsent,
                 execAction: step.exec?.action
                     ? {
                           kind: step.exec.action.kind,
@@ -899,15 +2061,15 @@ export async function runLoop<
                                   ? step.exec.action.token
                                   : undefined,
                           summary: undefined,
-                          data: step.exec.action as unknown as import('../types/turnTrace.js').JsonValue,
+                          data: compactModuleOutput(step.exec.action),
                       }
                     : undefined,
                 execResult: step.exec?.result
                     ? {
                           status: step.exec.result.status,
                           summary: undefined,
-                          data: step.exec.result.data as import('../types/turnTrace.js').JsonValue | undefined,
-                          error: step.exec.result.error as import('../types/turnTrace.js').JsonValue | undefined,
+                          data: compactModuleOutput(step.exec.result.data),
+                          error: compactModuleOutput(step.exec.result.error),
                           correlationId: step.exec.result.correlationId,
                       }
                     : undefined,
@@ -915,18 +2077,35 @@ export async function runLoop<
                     kind: outcome.kind,
                     token: 'token' in outcome ? outcome.token : undefined,
                     summary: undefined,
-                    result: 'result' in outcome ? (outcome as { result?: unknown }).result as import('../types/turnTrace.js').JsonValue : undefined,
+                    result: 'result' in outcome ? compactModuleOutput((outcome as { result?: unknown }).result) : undefined,
                 },
                 pendingAfter: summarizePending(env.pending ?? {}),
                 timings: turnTimings,
                 usage,
+                rewards: step.reward !== undefined ? { total: step.reward } : undefined,
                 correlationId,
                 traceId,
                 spanId,
+                parentSpanId: iterationTurnNode?.parentId,
                 llmCalls: iCtx.__turnLlmCalls,
                 toolCalls: iCtx.__turnToolCalls,
                 childCalls: iCtx.__turnChildCalls,
+                conversation: iCtx.__turnConversationSummary,
+                incomingMessages: iCtx.__turnIncomingConversationMessages,
+                outgoingMessages: iCtx.__turnOutgoingConversationMessages,
+                messageSequenceNumber: iCtx.__turnConversationSequenceNumber,
+                dedupeHit: iCtx.__turnConversationDedupeHit,
+                deliveryLagMs: iCtx.__turnConversationDeliveryLagMs,
+                topicSelectorDecision: iCtx.__turnTopicSelectorDecision,
+                fanoutSummary: iCtx.__turnFanoutSummary,
+                stopPolicy: iCtx.__turnStopPolicy,
+                inviteDelivery,
+                backpressure: iCtx.__turnBackpressure,
             };
+
+            if (iCtx.__turnTraceExtensions && iCtx.__turnTraceExtensions.length > 0) {
+                tracePayload.extensions = [...iCtx.__turnTraceExtensions];
+            }
 
             let trace: TurnTrace;
             try {
@@ -948,6 +2127,13 @@ export async function runLoop<
                     error: emitErr instanceof Error ? emitErr.message : String(emitErr),
                 });
             }
+            try {
+                await appendOperatorTurnEvent(ctx, trace);
+            } catch (eventErr) {
+                log.debug('Failed to append operator turn.completed event', {
+                    error: eventErr instanceof Error ? eventErr.message : String(eventErr),
+                });
+            }
             if (collector) {
                 collector.push(trace);
             }
@@ -957,6 +2143,19 @@ export async function runLoop<
             iCtx.__turnLlmCalls = undefined;
             iCtx.__turnToolCalls = undefined;
             iCtx.__turnChildCalls = undefined;
+            iCtx.__turnIncomingConversationMessages = undefined;
+            iCtx.__turnOutgoingConversationMessages = undefined;
+            iCtx.__turnConversationSummary = undefined;
+            iCtx.__turnConversationSequenceNumber = undefined;
+            iCtx.__turnConversationDedupeHit = undefined;
+            iCtx.__turnConversationDeliveryLagMs = undefined;
+            iCtx.__turnTopicSelectorDecision = undefined;
+            iCtx.__turnFanoutSummary = undefined;
+            iCtx.__turnStopPolicy = undefined;
+            iCtx.__turnTraceExtensions = undefined;
+            iCtx.__turnBackpressure = undefined;
+            iCtx.__turnInviteAutoJoin = undefined;
+            iCtx.__operatorMemoryEvent = undefined;
 
             log.debug('Transition outcome', {
                 taskId,
@@ -981,7 +2180,9 @@ export async function runLoop<
                 ? ((outcome as any).observations as Observation[])
                 : [];
 
-            if (outcome.kind === 'continue' && observations.length === 0) {
+            const hasBoundedProviderSegment = opts.segmentMaxTurns !== undefined ||
+                opts.segmentLatencyMs !== undefined;
+            if (outcome.kind === 'continue' && observations.length === 0 && !hasBoundedProviderSegment) {
                 throwInvariantError(
                     'CONTINUE_WITHOUT_OBSERVATIONS',
                     'Continue outcome requires at least one observation',
@@ -990,15 +2191,52 @@ export async function runLoop<
             }
 
             if (observations.length > 0) {
-                inbox.all.push(...observations);
-                inbox.current = [...observations];
+                const duplicateFiltered = observations.filter((obs) => {
+                    const k = conversationInboxDeliveryKey(obs);
+                    if (k === undefined) {
+                        return true;
+                    }
+                    if (consumedConversationMessageKeys.has(k)) {
+                        return false;
+                    }
+                    return true;
+                });
+                let nextCurrent = duplicateFiltered;
+                if (
+                    outcome.kind === 'continue' &&
+                    nextCurrent.length === 0 &&
+                    observations.length > 0
+                ) {
+                    nextCurrent = [
+                        {
+                            source: 'internal',
+                            kind: 'state.noted',
+                            payload: { reason: 'conversation_reemit_suppressed' },
+                        } as Observation,
+                    ];
+                }
+                if (nextCurrent.length > 0) {
+                    const liveInbox = ensureInbox(env);
+                    liveInbox.all.push(...nextCurrent);
+                    liveInbox.current = [...nextCurrent];
+                } else {
+                    env.inbox.current = [];
+                }
             } else {
-                // Hygiene: avoid having "phantom" observations by mistake 
-                // if next turn starts without them being cleared. 
+                // Hygiene: avoid having "phantom" observations by mistake
+                // if next turn starts without them being cleared.
                 // Perception is responsible for filling them.
                 env.inbox.current = [];
             }
 
+            if (consumedConversationMessageKeys.size > 0 && opts.onTurnCheckpoint) {
+                await opts.onTurnCheckpoint({
+                    M: m,
+                    env,
+                    outcome,
+                    consumedConversationMessageKeys,
+                });
+            }
 
             timings.push(step.timings || {});
             rewards.push(step.reward || 0);
@@ -1011,12 +2249,13 @@ export async function runLoop<
                 };
             } catch { /* noop */ }
         } catch (error) {
-            if (error instanceof InvariantError) throw error;
+            if (error instanceof InvariantError || hasTaskTurnOwnershipLossCause(error)) throw error;
             console.error(`[LoopRunner] 🛑 FATAL: Turn ${turn} failed with exception!`, error);
             log.error(`Turn ${turn} failed`, { error: error instanceof Error ? error.message : String(error) });
             outcome = {
                 kind: 'fail',
-                reason: `turn_${turnIdx}_error: ${error instanceof Error ? error.message : String(error)}`
+                reason: `turn_${turnIdx}_error: ${error instanceof Error ? error.message : String(error)}`,
+                error: error
             };
             // Hygiene: clear current inbox on fatal error to avoid leaking state to next run
             env.inbox.current = [];
@@ -1028,17 +2267,15 @@ export async function runLoop<
             }
             break;
         } finally {
-            // restore context
-            if (ctx.telemetry) {
-                ctx.telemetry.nodeId = prevCtxTelemetryNodeId || ''; //Restore previous node (e.g. AgentNode)
+            // restore context (never use '' — it breaks LLM bridge parent resolution)
+            if (ctx.telemetry && prevCtxTelemetryNodeId !== undefined) {
+                ctx.telemetry.nodeId = prevCtxTelemetryNodeId;
             }
             (ctx as any).currentTurnNodeId = prevCtxTurnNodeId;
         }
 
 
-        // Stop on await_* or terminal
-        // 🔍 DEBUG: Log loop continuation check
-        console.log(`[LoopRunner] Checking outcome. Kind: ${outcome.kind}`);
+        // Stop on await_* or terminal (do not log every iteration — Jest captures console output and long suites can OOM)
         if (outcome.kind !== 'continue') {
             // ✅ RADICAL FIX: If await_child but child result is ALREADY in inbox, continue instead of exiting!
             // This prevents the race condition where:
@@ -1054,9 +2291,9 @@ export async function runLoop<
 
                 // First check local inbox OR the current env.inbox (which might be fresh/replaced)
                 let childResultInInbox = inbox.all.some(
-                    (o: any) => o.kind === 'child.completed' && o.payload?.token === awaitToken
+                    (o: any) => (o.kind === 'child.completed' || o.kind === 'child.failed') && o.payload?.token === awaitToken
                 ) || env.inbox.all.some(
-                    (o: any) => o.kind === 'child.completed' && o.payload?.token === awaitToken
+                    (o: any) => (o.kind === 'child.completed' || o.kind === 'child.failed') && o.payload?.token === awaitToken
                 );
 
                 // If not in local inbox, reload from database
@@ -1071,7 +2308,7 @@ export async function runLoop<
                                 const freshInbox = (freshSnap.snapshot as any)?.inbox;
                                 if (freshInbox && Array.isArray(freshInbox.all)) {
                                     childResultInInbox = freshInbox.all.some(
-                                        (o: any) => o.kind === 'child.completed' && o.payload?.token === awaitToken
+                                        (o: any) => (o.kind === 'child.completed' || o.kind === 'child.failed') && o.payload?.token === awaitToken
                                     );
                                     if (childResultInInbox) {
                                         log.debug('🔄 SYNC CHILD: Found child result in database inbox, continuing loop instead of yielding', {
@@ -1097,9 +2334,9 @@ export async function runLoop<
                     });
                     // Move child completion to current inbox for next turn
                     const childObs = inbox.all.find(
-                        (o: any) => o.kind === 'child.completed' && o.payload?.token === awaitToken
+                        (o: any) => (o.kind === 'child.completed' || o.kind === 'child.failed') && o.payload?.token === awaitToken
                     ) || env.inbox.all.find(
-                        (o: any) => o.kind === 'child.completed' && o.payload?.token === awaitToken
+                        (o: any) => (o.kind === 'child.completed' || o.kind === 'child.failed') && o.payload?.token === awaitToken
                     );
                     if (childObs) {
                         // ✅ FIX: Explicitly set inbox.current to ensure perception sees the result
@@ -1122,6 +2359,7 @@ export async function runLoop<
 
                     // ✅ FIX: Remove from pending children so next turn doesn't await again
                     if (env.pending && env.pending.children && awaitToken) {
+                        copyPendingStampToTerminalIfAbsent(env, 'children', awaitToken);
                         delete env.pending.children[awaitToken];
                         log.debug('🔄 SYNC CHILD: Removed child from pending', { awaitToken: awaitToken?.substring(0, 15) });
                     }
@@ -1178,8 +2416,9 @@ export async function runLoop<
                     }
 
                     // Remove from pending tools
-                    if (env.pending && (env.pending as any).tools && awaitToken) {
-                        delete (env.pending as any).tools[awaitToken];
+                    if (env.pending?.tools && awaitToken) {
+                        copyPendingStampToTerminalIfAbsent(env, 'tools', awaitToken);
+                        delete env.pending.tools[awaitToken];
                     }
 
                     // Convert await_tool to continue so loop proceeds
@@ -1189,7 +2428,7 @@ export async function runLoop<
 
             // Transition invariant enforcement: await_* must have token; terminal must have no pending
             if (outcome.kind !== 'continue') {
-                if (outcome.kind === 'await_input' || outcome.kind === 'await_tool' || outcome.kind === 'await_child') {
+                if (outcome.kind === 'await_input' || outcome.kind === 'await_tool' || outcome.kind === 'await_child' || outcome.kind === 'await_event') {
                     const token = (outcome as { token?: string }).token;
                     if (typeof token !== 'string' || token.trim() === '') {
                         throwInvariantError(
@@ -1205,6 +2444,7 @@ export async function runLoop<
                         (p?.inputs && Object.keys(p.inputs).length > 0) ||
                         (p?.children && Object.keys(p.children).length > 0) ||
                         (p?.tools && Object.keys(p.tools).length > 0) ||
+                        (p?.events && Object.keys(p.events).length > 0) ||
                         (p?.groups && Object.keys(p.groups).length > 0);
                     if (hasPending) {
                         throwInvariantError(
@@ -1244,6 +2484,21 @@ export async function runLoop<
             break;
         }
 
+        const segmentTurnBoundary = segmentMaxTurns !== undefined && turnIdx === segmentMaxTurns - 1;
+        const segmentLatencyBoundary = opts.segmentLatencyMs !== undefined &&
+            Date.now() - start >= opts.segmentLatencyMs;
+        if (segmentTurnBoundary || segmentLatencyBoundary) {
+            log.debug('Provider segment boundary reached', {
+                taskId,
+                runId,
+                turnIdx,
+                segmentMaxTurns,
+                segmentLatencyMs: opts.segmentLatencyMs,
+                elapsedMs: Date.now() - start,
+            });
+            break;
+        }
+
         if (turnIdx === maxTurns - 1) {
             log.debug('🔍 DEBUG: Local budget check triggered', { taskId, runId, turnIdx, maxTurns });
             throwInvariantError(
@@ -1252,8 +2507,6 @@ export async function runLoop<
                 { type: 'budget_exceeded', budget: 'turns', limit: maxTurns, actual: turnIdx + 1 }
             );
         }
-
-
 
     }
 

@@ -1,23 +1,110 @@
-import { TaskEngine } from '../src/orchestration/taskEngine.js';
-import { InMemorySessionManager } from '../src/orchestration/InMemorySessionManager.js';
-import { globalA2AService } from '../src/orchestration/A2AService.js';
 import { jest } from '@jest/globals';
+import path from 'node:path';
 import type { TaskContext } from '../src/shared/types/index.js';
 
 describe('TaskEngine sync completion', () => {
     const tenantId = 'tenant-test';
     const parentTaskId = 'parent-task';
+    const srcDir = path.resolve(process.cwd(), 'packages/core/src');
 
-    const buildEngine = () => {
+    const createFakeArtifactPrisma = () => {
+        const artifacts = new Map<string, unknown>();
+        return {
+            agentResultCache: {
+                upsert: jest.fn(async (args: any) => {
+                    artifacts.set(args.create.cacheKey, args.create.result);
+                    return args.create;
+                }),
+                findUnique: jest.fn(async (args: any) => {
+                    const cacheKey = args.where?.tenantId_agentName_cacheKey?.cacheKey;
+                    if (!artifacts.has(cacheKey)) return null;
+                    return {
+                        id: cacheKey,
+                        result: artifacts.get(cacheKey),
+                        createdAt: new Date(),
+                        expiresAt: new Date(Date.now() + 60_000),
+                    };
+                }),
+                delete: jest.fn(async () => ({})),
+            },
+        };
+    };
+
+    const buildEngine = async (
+        sendTaskToAgent?: (params: any) => Promise<any>,
+        artifactPrisma?: ReturnType<typeof createFakeArtifactPrisma>
+    ) => {
+        jest.resetModules();
         process.env.DISABLE_OUTBOX_PUBLISHER = 'true';
+        const sendMock = jest.fn(sendTaskToAgent ?? (async () => undefined));
+        const findMock = jest.fn(async () => ({
+            manifest: { name: 'child-agent' },
+            resolved: {
+                agentCard: { name: 'child-agent', version: '1.0.0' },
+                runtimeManifest: { name: 'child-agent', version: '1.0.0' },
+            },
+            loop: {},
+            llmAdapter: {},
+            tenantId,
+        }));
+        await jest.unstable_mockModule(path.join(srcDir, 'orchestration/A2AService.ts'), () => ({
+            globalA2AService: {
+                sendTaskToAgent: sendMock,
+                findLocalAgent: findMock,
+            },
+        }));
+        const [{ TaskEngine }, { InMemorySessionManager }] = await Promise.all([
+            import(path.join(srcDir, 'orchestration/taskEngine.ts')),
+            import(path.join(srcDir, 'orchestration/InMemorySessionManager.ts')),
+        ]);
         const store = new InMemorySessionManager();
+        if (artifactPrisma !== undefined) {
+            (store as any).prisma = artifactPrisma;
+        }
         const engine = new TaskEngine({ sessionStore: store });
         // Access private sessionManager for test setup
         const sessionManager = (engine as any).sessionManager;
-        return { engine, sessionManager };
+        return { engine, sessionManager, sendMock };
     };
 
-    const setupContext = async (engine: TaskEngine, sessionManager: any) => {
+    it('reconstructs the canonical artifact factory after a fresh TaskEngine instance', async () => {
+        const prisma = createFakeArtifactPrisma();
+        const first = await buildEngine(undefined, prisma);
+        const firstCtx: TaskContext = (first.engine as any).createContext(
+            { id: parentTaskId, input: {} },
+            { tenantId, agentId: 'parent-agent' }
+        );
+        await (first.engine as any).apiBinder.attachOrchestrationAPIs(firstCtx, {
+            tenantId,
+            sessionId: parentTaskId,
+            agentId: 'parent-agent',
+            flushMentalState: async () => {},
+        });
+
+        const beforeRestart = firstCtx.artifacts.text('before restart');
+        await expect(Promise.resolve(beforeRestart)).resolves.toBe('before restart');
+
+        const second = await buildEngine(undefined, prisma);
+        const resumedCtx: TaskContext = (second.engine as any).createContext(
+            { id: parentTaskId, input: {} },
+            { tenantId, agentId: 'parent-agent' }
+        );
+        const suppliedFactory = resumedCtx.artifacts;
+        await (second.engine as any).apiBinder.attachOrchestrationAPIs(resumedCtx, {
+            tenantId,
+            sessionId: parentTaskId,
+            agentId: 'parent-agent',
+            flushMentalState: async () => {},
+        });
+
+        expect(resumedCtx.artifacts).toBe(suppliedFactory);
+        const afterRestart = resumedCtx.artifacts.json({ phase: 'resumed' });
+        expect(afterRestart).not.toBeInstanceOf(Promise);
+        await expect(Promise.resolve(afterRestart)).resolves.toEqual({ phase: 'resumed' });
+        await expect(Promise.resolve(beforeRestart)).resolves.toBe('before restart');
+    });
+
+    const setupContext = async (engine: any, sessionManager: any) => {
         const taskEntity = { id: parentTaskId, input: {} };
         // Create context using private method
         const ctx: TaskContext = (engine as any).createContext(taskEntity);
@@ -29,7 +116,13 @@ describe('TaskEngine sync completion', () => {
             agentId: 'parent-agent',
             expectedWmVersion: BigInt(0),
             snapshot: {
-                meta: { agentId: 'parent-agent', turn: 0 },
+                meta: {
+                    agentId: 'parent-agent', turn: 0,
+                    turnCoordinator: {
+                        schemaVersion: 1, nextFence: '0', nextTurnSeq: 0,
+                        requestedGeneration: '0', completedGeneration: '0',
+                    },
+                },
                 M: {
                     memory: {
                         vars: {},
@@ -61,21 +154,12 @@ describe('TaskEngine sync completion', () => {
     };
 
     it('returns object with token when sync child returns a result object (fix for cache hit bug)', async () => {
-        const { engine, sessionManager } = buildEngine();
-        const ctx = await setupContext(engine, sessionManager);
-
         const mockResult = {
             status: { state: 'completed' },
             data: { some: 'data' }
         };
-
-        // Spy on globalA2AService.sendTaskToAgent to simulate sync completion
-        const sendSpy = jest.spyOn(globalA2AService, 'sendTaskToAgent')
-            .mockImplementation(async (params: any) => {
-                // Return the result directly to simulate a Sync Completion (like a Cache Hit)
-                // The engine will handle calling handleChildCompleted
-                return mockResult;
-            });
+        const { engine, sessionManager } = await buildEngine(async () => mockResult);
+        const ctx = await setupContext(engine, sessionManager);
 
 
         // Call context API
@@ -88,20 +172,11 @@ describe('TaskEngine sync completion', () => {
         expect(result.handle).toBeDefined();
         expect(result.handle.status).toEqual(mockResult.status);
         expect(result.handle.data).toEqual(mockResult.data);
-
-        sendSpy.mockRestore();
     });
 
     it('returns object with token when sync child returns undefined (fallback path)', async () => {
-        const { engine, sessionManager } = buildEngine();
+        const { engine, sessionManager } = await buildEngine(async () => undefined);
         const ctx = await setupContext(engine, sessionManager);
-
-        // Spy with input_required scenario where it returns undefined
-        const sendSpy = jest.spyOn(globalA2AService, 'sendTaskToAgent')
-            .mockImplementation(async (params: any) => {
-                // Return undefined to simulate async start (input_required or just started)
-                return undefined;
-            });
 
         const result = await ctx.sendTaskToAgent('child-agent', { some: 'input' }) as any;
 
@@ -112,19 +187,9 @@ describe('TaskEngine sync completion', () => {
         // Since result was undefined, these properties wouldn't be assigned
         expect((result.handle as any).status).toBeUndefined();
         expect((result.handle as any).data).toBeUndefined();
-
-        sendSpy.mockRestore();
     });
 
     it('injects flattened child result into active loop inbox (Payload Consistency Fix)', async () => {
-        const { engine, sessionManager } = buildEngine();
-        const ctx = await setupContext(engine, sessionManager);
-
-        // Mock __activeLoopInbox on context
-        const mockInbox: any = { current: [], all: [] };
-        (ctx as any).__activeLoopInbox = mockInbox;
-        (ctx as any).__activeLoopEnv = { turn: 5 };
-
         // Mock a TaskEntity result (wrapped)
         const mockChildTaskEntity = {
             id: 'child-task-123',
@@ -137,14 +202,13 @@ describe('TaskEngine sync completion', () => {
                 }
             }
         };
+        const { engine, sessionManager } = await buildEngine(async () => mockChildTaskEntity);
+        const ctx = await setupContext(engine, sessionManager);
+        const mockInbox: any = { current: [], all: [] };
+        (ctx as any).__activeLoopInbox = mockInbox;
+        (ctx as any).__activeLoopEnv = { turn: 5 };
 
-        const sendSpy = jest.spyOn(globalA2AService, 'sendTaskToAgent')
-            .mockImplementation(async (params: any) => {
-                // Return the TaskEntity object
-                return mockChildTaskEntity;
-            });
-
-        const result = await ctx.sendTaskToAgent('child-agent', { some: 'input' }, { awaitCompletion: false }) as any;
+        const result = await ctx.sendTaskToAgent('child-agent', { some: 'input' }, { awaitCompletion: true }) as any;
 
         expect(result.token).toBeDefined();
 
@@ -167,7 +231,81 @@ describe('TaskEngine sync completion', () => {
         // 3. Execution Metadata (should be populated)
         expect(obs.payload.executionMetadata).toBeDefined();
         expect(obs.payload.executionMetadata?.timings).toEqual({ start: 1, end: 2 });
+    });
 
-        sendSpy.mockRestore();
+    it('injects artifact-backed child HTML into active loop inbox', async () => {
+        const rawHtml = `<html>${'active-loop-child-html'.repeat(5000)}</html>`;
+        const mockChildTaskEntity = {
+            id: 'child-task-large',
+            status: {
+                state: 'completed',
+                timestamp: 123456,
+                metadata: {
+                    result: {
+                        ok: true,
+                        data: {
+                            html: rawHtml,
+                            content: rawHtml,
+                        },
+                    },
+                },
+            },
+        };
+        const { engine, sessionManager } = await buildEngine(async () => mockChildTaskEntity);
+        (sessionManager as any).store.prisma = createFakeArtifactPrisma();
+        const ctx = await setupContext(engine, sessionManager);
+        const mockInbox: any = { current: [], all: [] };
+        (ctx as any).__activeLoopInbox = mockInbox;
+        (ctx as any).__activeLoopEnv = { turn: 5 };
+
+        await ctx.sendTaskToAgent('child-agent', { some: 'input' }, { awaitCompletion: true });
+
+        const serialized = JSON.stringify(mockInbox);
+        expect(serialized).not.toContain(rawHtml);
+        const html = mockInbox.current[0]?.payload?.result?.data?.html;
+        const content = mockInbox.current[0]?.payload?.result?.data?.content;
+        expect(html).toEqual(expect.objectContaining({
+            kind: 'artifact',
+            mimeType: 'text/html',
+        }));
+        expect(content).toEqual(expect.objectContaining({
+            kind: 'artifact',
+            mimeType: 'text/html',
+        }));
+    });
+
+    it('returns the canonical blocking-child artifact marker with the durable ID', async () => {
+        const { Artifact } = await import('@a2arium/callagent-memory-engine');
+        const rawHtml = `<html>${'canonical-child-html'.repeat(5000)}</html>`;
+        const localArtifact = Artifact.create(rawHtml, { mimeType: 'text/html' });
+        const mockChildTaskEntity = {
+            id: 'child-task-canonical',
+            status: {
+                state: 'completed',
+                timestamp: 123456,
+                metadata: { result: { html: localArtifact } },
+            },
+        };
+        const { engine, sessionManager } = await buildEngine(async () => mockChildTaskEntity);
+        const prisma = createFakeArtifactPrisma();
+        (sessionManager as any).store.prisma = prisma;
+        const ctx = await setupContext(engine, sessionManager);
+        const mockInbox: any = { current: [], all: [] };
+        (ctx as any).__activeLoopInbox = mockInbox;
+        (ctx as any).__activeLoopEnv = { turn: 5 };
+
+        const returned = await ctx.sendTaskToAgent(
+            'child-agent',
+            { some: 'input' },
+            { awaitCompletion: true }
+        ) as any;
+
+        const returnedArtifact = returned.handle.status.metadata.result.html;
+        const observedArtifact = mockInbox.current[0].payload.result.html;
+        expect(returnedArtifact.id).toBe(observedArtifact.id);
+        expect(typeof returnedArtifact.then).toBe('function');
+        await expect(returnedArtifact).resolves.toBe(rawHtml);
+        expect(prisma.agentResultCache.upsert).toHaveBeenCalledTimes(1);
+        expect(JSON.stringify(returned)).not.toContain(rawHtml);
     });
 });

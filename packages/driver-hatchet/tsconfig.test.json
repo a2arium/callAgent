@@ -1,0 +1,19 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "declaration": false,
+    "isolatedModules": true,
+    "noEmit": true,
+    "rootDir": "../.."
+  },
+  "include": [
+    "src/**/*.ts",
+    "tests/**/*.ts",
+    "../core/src/**/*.ts",
+    "../eventbus-nats/src/**/*.ts",
+    "../memory-engine/src/**/*.ts",
+    "../memory-sql/src/**/*.ts",
+    "../types/src/**/*.ts",
+    "../utils/src/**/*.ts"
+  ]
+}

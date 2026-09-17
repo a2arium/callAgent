@@ -19,6 +19,9 @@ export class AgentRegistry {
         const name = agent.resolved.agentCard.name;
 
         if (this.agents.has(name)) {
+            if (process.env.CALLAGENT_STRICT_AGENT_IDS === 'true') {
+                throw new Error(`Duplicate canonical agent id in composed runtime: ${name}`);
+            }
             registryLogger.warn('Agent already registered, overwriting', { name });
         }
 
@@ -27,6 +30,10 @@ export class AgentRegistry {
         // Create common aliases
         const shortName = name.replace(/[-_]agent$/i, '');
         if (shortName !== name) {
+            const existing = this.aliases.get(shortName);
+            if (process.env.CALLAGENT_STRICT_AGENT_IDS === 'true' && existing && existing !== name) {
+                throw new Error(`Ambiguous agent alias in composed runtime: ${shortName} (${existing}, ${name})`);
+            }
             this.aliases.set(shortName, name);
         }
 
@@ -44,6 +51,8 @@ export class AgentRegistry {
         // Try exact name first
         let agent = this.agents.get(nameOrAlias);
         if (agent) return agent;
+
+        if (process.env.CALLAGENT_STRICT_AGENT_IDS === 'true') return null;
 
         // Try alias
         const canonicalName = this.aliases.get(nameOrAlias);

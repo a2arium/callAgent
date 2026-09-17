@@ -5,21 +5,23 @@
 
 import { jest } from '@jest/globals';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const srcDir = path.resolve(__dirname, '../src');
-import type { IWorkingMemorySessionStore, WMSessionSnapshot } from '@a2arium/callagent-memory-engine';
-import { setPendingTasks, setPendingGroups, getPendingGroups } from '../src/orchestration/Handles.js';
+const srcDir = path.resolve(process.cwd(), 'packages/core/src');
+import type { WMSessionSnapshot } from '@a2arium/callagent-memory-engine';
+import { InMemorySessionManager } from '../src/orchestration/InMemorySessionManager.js';
+import { TaskHandle, setPendingTasks, setPendingGroups, getPendingGroups } from '../src/orchestration/Handles.js';
 import { setPendingTools, getPendingTools } from '../src/orchestration/ToolsRegistry.js';
 import { setPendingExternalEvents, getPendingExternalEvents } from '../src/orchestration/ExternalEventsRegistry.js';
 import { normalizeObservationInbox } from '../src/loop/types.js';
 import type { SynthesizeObservation } from '../src/loop/oneTurn.js';
 import type { ObservationConfig } from '../src/loop/oneTurn.js';
 import { InboxManager } from '../src/orchestration/InboxManager.js';
+import { readSegmentCancellation } from '../src/runtime/segmentCancellation.js';
 import { offloadArtifacts } from '@a2arium/callagent-memory-engine';
 import { LocalArtifactImpl } from '../src/orchestration/LocalArtifactImpl.js';
 import { TaskEngine } from '../src/orchestration/taskEngine.js';
+import { TaskExecutor } from '../src/orchestration/TaskExecutor.js';
+import { SessionManager } from '../src/orchestration/SessionManager.js';
 import { globalA2AService } from '../src/orchestration/A2AService.js';
 import { InvariantError } from '../src/utils/errors.js';
 
@@ -41,42 +43,85 @@ mockFindLocalAgent.mockResolvedValue({
 
 type EngineObservation = SynthesizeObservation<ObservationConfig & { user: unknown; tool: unknown; child: unknown; internal?: unknown; env?: unknown }>;
 
-class FakeSessionStore implements IWorkingMemorySessionStore {
-    private snapshots = new Map<string, WMSessionSnapshot>();
-    private events: Array<{ tenantId: string; sessionId: string; type: string; payload: Record<string, unknown> }> = [];
-    private outbox: Array<{ tenantId: string; topic: string; key: string; payload: Record<string, unknown> }> = [];
+class FakeSessionStore extends InMemorySessionManager {
     public failNextSave = false;
     public failNextSaveTooLarge = false;
     public failNextSaveWithSizeError = false;
     public failOnWriteNumber: number | null = null;
     public writeCount = 0;
 
+    private snapshotsMap(): Map<string, WMSessionSnapshot> {
+        return (this as unknown as { snapshots: Map<string, WMSessionSnapshot> }).snapshots;
+    }
+
+    private eventsMap(): Map<
+        string,
+        Array<{
+            eventId: string;
+            seq: number;
+            type: string;
+            payload: Record<string, unknown>;
+            createdAt: string;
+        }>
+    > {
+        return (this as unknown as {
+            events: Map<
+                string,
+                Array<{
+                    eventId: string;
+                    seq: number;
+                    type: string;
+                    payload: Record<string, unknown>;
+                    createdAt: string;
+                }>
+            >;
+        }).events;
+    }
+
+    private outboxArr(): Array<{ tenantId: string; topic: string; key: string; payload: Record<string, unknown> }> {
+        return (this as unknown as {
+            outbox: Array<{ tenantId: string; topic: string; key: string; payload: Record<string, unknown> }>;
+        }).outbox;
+    }
+
     seed(tenantId: string, sessionId: string, snapshot: Record<string, unknown>, wmVersion = BigInt(0), agentId = 'agent'): void {
         const key = `${tenantId}:${sessionId}`;
-        // Clone on seed
-        const cloned = JSON.parse(JSON.stringify(snapshot));
-        this.snapshots.set(key, { wmVersion, snapshot: cloned, agentId, updatedAt: new Date().toISOString() });
+        const cloned = JSON.parse(JSON.stringify(snapshot)) as Record<string, unknown>;
+        const meta = ((cloned.meta ?? {}) as Record<string, unknown>);
+        if (meta.turnCoordinator === undefined) {
+            meta.turnCoordinator = {
+                schemaVersion: 1, nextFence: '0', nextTurnSeq: 0,
+                requestedGeneration: '0', completedGeneration: '0',
+            };
+        }
+        cloned.meta = meta;
+        this.snapshotsMap().set(key, { wmVersion, snapshot: cloned, agentId, updatedAt: new Date().toISOString() });
     }
 
     getEvents(tenantId: string, sessionId: string) {
-        return this.events.filter(e => e.tenantId === tenantId && e.sessionId === sessionId);
+        const key = `${tenantId}:${sessionId}`;
+        const eventList = this.eventsMap().get(key) || [];
+        return eventList.map((e) => ({ tenantId, sessionId, type: e.type, payload: e.payload }));
+    }
+
+    getOutbox() {
+        return [...this.outboxArr()];
     }
 
     getSnapshot(tenantId: string, sessionId: string): WMSessionSnapshot | null {
-        const snap = this.snapshots.get(`${tenantId}:${sessionId}`) ?? null;
+        const snap = this.snapshotsMap().get(`${tenantId}:${sessionId}`) ?? null;
         if (!snap) return null;
-        // Clone on read
         return {
             ...snap,
-            snapshot: JSON.parse(JSON.stringify(snap.snapshot))
+            snapshot: JSON.parse(JSON.stringify(snap.snapshot)) as Record<string, unknown>,
         };
     }
 
-    async getSessionSnapshot(tenantId: string, sessionId: string): Promise<WMSessionSnapshot | null> {
+    override async getSessionSnapshot(tenantId: string, sessionId: string): Promise<WMSessionSnapshot | null> {
         return this.getSnapshot(tenantId, sessionId);
     }
 
-    async writeSnapshotCAS(params: {
+    override async writeSnapshotCAS(params: {
         tenantId: string;
         sessionId: string;
         agentId: string;
@@ -84,13 +129,13 @@ class FakeSessionStore implements IWorkingMemorySessionStore {
         snapshot: Record<string, unknown>;
     }): Promise<{ newVersion: bigint }> {
         const key = `${params.tenantId}:${params.sessionId}`;
-        const current = this.snapshots.get(key);
+        const current = this.snapshotsMap().get(key);
         const currentVersion = current?.wmVersion ?? BigInt(0);
 
         if (this.failNextSave || (this.failOnWriteNumber && this.writeCount + 1 === this.failOnWriteNumber)) {
             this.writeCount++;
-            this.failNextSave = false; // Reset failNextSave if it was triggered
-            this.failOnWriteNumber = null; // Reset failOnWriteNumber if it was triggered
+            this.failNextSave = false;
+            this.failOnWriteNumber = null;
             throw new Error('CAS_MISMATCH');
         }
 
@@ -113,32 +158,86 @@ class FakeSessionStore implements IWorkingMemorySessionStore {
         const newVersion = currentVersion + BigInt(1);
 
         this.writeCount++;
-        // Clone on write
-        const cloned = JSON.parse(JSON.stringify(params.snapshot));
-        this.snapshots.set(key, {
+        const cloned = JSON.parse(JSON.stringify(params.snapshot)) as Record<string, unknown>;
+        this.snapshotsMap().set(key, {
             wmVersion: newVersion,
             snapshot: cloned,
             agentId: params.agentId,
-            updatedAt: new Date().toISOString()
+            updatedAt: new Date().toISOString(),
         });
         return { newVersion };
     }
 
-    async appendEvent(params: { tenantId: string; sessionId: string; type: string; payload: Record<string, unknown> }): Promise<{ eventId: string; seq: number }> {
-        this.events.push(params);
-        return { eventId: `evt-${this.events.length}`, seq: this.events.length - 1 };
+    override async appendEvent(params: {
+        tenantId: string;
+        sessionId: string;
+        type: string;
+        payload: Record<string, unknown>;
+    }): Promise<{ eventId: string; seq: number }> {
+        const key = `${params.tenantId}:${params.sessionId}`;
+        const eventList = this.eventsMap().get(key) || [];
+        const seq = eventList.length;
+        const eventId = `evt_${Date.now()}_${seq}`;
+        eventList.push({
+            eventId,
+            seq,
+            type: params.type,
+            payload: params.payload,
+            createdAt: new Date().toISOString(),
+        });
+        this.eventsMap().set(key, eventList);
+        return { eventId, seq };
     }
 
-    async listEventsSince(params: { tenantId: string; sessionId: string; sinceSeq: number; }): Promise<Array<{ eventId: string; seq: number; type: string; payload: Record<string, unknown>; createdAt: string }>> {
-        return this.events
-            .map((e, idx) => ({ ...e, seq: idx }))
-            .filter(e => e.tenantId === params.tenantId && e.sessionId === params.sessionId && e.seq > params.sinceSeq)
-            .map(e => ({ eventId: `evt-${e.seq}`, seq: e.seq, type: e.type, payload: e.payload, createdAt: new Date().toISOString() }));
+    override async listEventsSince(params: {
+        tenantId: string;
+        sessionId: string;
+        sinceSeq: number;
+    }): Promise<
+        Array<{
+            eventId: string;
+            seq: number;
+            type: string;
+            payload: Record<string, unknown>;
+            createdAt: string;
+        }>
+    > {
+        const key = `${params.tenantId}:${params.sessionId}`;
+        const eventList = this.eventsMap().get(key) || [];
+        return eventList.filter((e) => e.seq > params.sinceSeq);
     }
 
-    async enqueueOutbox(params: { tenantId: string; topic: string; key: string; payload: Record<string, unknown> }): Promise<void> {
-        this.outbox.push(params);
+    override async enqueueOutbox(params: {
+        tenantId: string;
+        topic: string;
+        key: string;
+        payload: Record<string, unknown>;
+    }): Promise<void> {
+        this.outboxArr().push(params);
     }
+}
+
+function createFakeArtifactPrisma() {
+    const artifacts = new Map<string, unknown>();
+    return {
+        agentResultCache: {
+            upsert: jest.fn(async (args: any) => {
+                artifacts.set(args.create.cacheKey, args.create.result);
+                return args.create;
+            }),
+            findUnique: jest.fn(async (args: any) => {
+                const cacheKey = args.where?.tenantId_agentName_cacheKey?.cacheKey;
+                if (!artifacts.has(cacheKey)) return null;
+                return {
+                    id: cacheKey,
+                    result: artifacts.get(cacheKey),
+                    createdAt: new Date(),
+                    expiresAt: new Date(Date.now() + 60_000),
+                };
+            }),
+            delete: jest.fn(async () => ({})),
+        },
+    };
 }
 
 const buildObservation = (token: string): EngineObservation => ({
@@ -160,6 +259,40 @@ const createCtx = (overrides: Record<string, unknown> = {}) => ({
     ...overrides
 });
 
+const mockInlineParentResume = () =>
+    jest.spyOn(TaskExecutor, 'executeTurn').mockImplementation(async (params: any) => {
+        const latest = await params.sessionManager.load(params.tenantId, params.sessionId);
+        const snapshot = JSON.parse(JSON.stringify(latest?.snapshot ?? {})) as Record<string, unknown>;
+        const meta = { ...((snapshot as any).meta ?? {}) };
+        const currentTurn = Number(meta.turn ?? params.env?.turn ?? 0);
+        meta.turn = currentTurn + 1;
+        delete (meta as any).awaiting;
+        (snapshot as any).meta = meta;
+
+        await params.sessionManager.saveSnapshot({
+            tenantId: params.tenantId,
+            sessionId: params.sessionId,
+            agentId: params.agentId,
+            expectedWmVersion: latest?.wmVersion ?? BigInt(0),
+            snapshot,
+        });
+
+        return {
+            M: params.M,
+            outcome: { kind: 'complete', result: {} },
+            metrics: {},
+            taskStatus: {
+                state: 'completed',
+                timestamp: new Date().toISOString(),
+                metadata: { result: {} },
+            },
+        } as any;
+    });
+
+const mockLegacyInlineParentResume = () => {
+    return mockInlineParentResume();
+};
+
 const loadEngineWithA2AMock = async (sendResult: unknown) => {
     jest.resetModules();
     const sendMock = jest.fn() as jest.MockedFunction<(params: any) => Promise<any>>;
@@ -175,18 +308,22 @@ const loadEngineWithA2AMock = async (sendResult: unknown) => {
         llmAdapter: {},
         tenantId: 'test-tenant'
     });
-    await jest.unstable_mockModule(path.resolve(srcDir, 'orchestration/A2AService.ts'), () => ({
+    await jest.unstable_mockModule(path.join(srcDir, 'orchestration/A2AService.ts'), () => ({
         globalA2AService: { sendTaskToAgent: sendMock, findLocalAgent: findMock }
     } as any));
-    await jest.unstable_mockModule(path.resolve(srcDir, 'eventbus/outboxPublisher.ts'), () => ({
-        outboxPublisher: { start: jest.fn(), stop: jest.fn() }
+    await jest.unstable_mockModule(path.join(srcDir, 'eventbus/outboxPublisher.ts'), () => ({
+        OutboxPublisher: jest.fn().mockImplementation(() => ({
+            start: jest.fn(),
+            stop: jest.fn(),
+        })),
     }));
-    await jest.unstable_mockModule(path.resolve(srcDir, 'loop/loopRunner.ts'), () => ({
-        runLoop: (...args: any[]) => runLoopMock(...args)
+    await jest.unstable_mockModule(path.join(srcDir, 'loop/loopRunner.ts'), () => ({
+        runLoop: (...args: any[]) => runLoopMock(...args),
+        flushBufferedOperatorTurnEvents: jest.fn(async () => undefined),
     }));
     await jest.unstable_mockModule('@prisma/client', () => ({ PrismaClient: class { } }), { virtual: true });
-    const mod = await import('../src/orchestration/taskEngine.js');
-    const a2aModule = await import('../src/orchestration/A2AService.js');
+    const mod = await import(path.join(srcDir, 'orchestration/taskEngine.ts'));
+    const a2aModule = await import(path.join(srcDir, 'orchestration/A2AService.ts'));
     (a2aModule as any).globalA2AService.sendTaskToAgent = sendMock;
     (a2aModule as any).globalA2AService.findLocalAgent = findMock;
     return { TaskEngine: (mod as any).TaskEngine, sendMock, findMock };
@@ -219,6 +356,469 @@ afterEach(() => {
 });
 
 describe('TaskEngine orchestration coverage', () => {
+    test('cancelTask marks cancellation durably before delegating to the runtime driver', async () => {
+        const store = new FakeSessionStore();
+        const cancel = jest.fn(async () => undefined);
+        const runtimeDriver = {
+            enqueueStart: jest.fn(async () => undefined),
+            enqueueResume: jest.fn(async () => undefined),
+            enqueueChildDispatch: jest.fn(async () => undefined),
+            scheduleTimer: jest.fn(async () => ({ timerId: 'timer-1' })),
+            cancel,
+            dispatchOutbox: jest.fn(async () => undefined),
+        };
+        const engine = new TaskEngine({
+            sessionStore: store as any,
+            handlerInvoker: { invoke: jest.fn() } as any,
+            runtimeDriver: runtimeDriver as any,
+        });
+        store.seed('t', 'task-cancel', {
+            meta: { agentId: 'agent-a', awaiting: { kind: 'await_child', token: 'child-token' } },
+        }, BigInt(0), 'agent-a');
+
+        await engine.cancelTask({
+            tenantId: 't',
+            taskId: 'task-cancel',
+            agentId: 'agent-a',
+            reason: 'operator stop',
+        });
+
+        const persisted = store.getSnapshot('t', 'task-cancel');
+        expect(readSegmentCancellation(persisted?.snapshot)).toEqual({
+            requested: true,
+            reason: 'operator stop',
+            requestedAt: expect.any(String),
+        });
+        expect(store.getEvents('t', 'task-cancel')).toEqual([
+            {
+                tenantId: 't',
+                sessionId: 'task-cancel',
+                type: 'task.canceled',
+                payload: {
+                    taskId: 'task-cancel',
+                    agentId: 'agent-a',
+                    reason: 'operator stop',
+                    requestedAt: expect.any(String),
+                },
+            },
+        ]);
+        expect(cancel).toHaveBeenCalledWith({
+            tenantId: 't',
+            taskId: 'task-cancel',
+            agentId: 'agent-a',
+            idempotencyKey: 'task-cancel:cancel',
+            reason: 'operator stop',
+        });
+    });
+
+    test('cancelTask still acknowledges when provider cancellation fails after durable marker', async () => {
+        const store = new FakeSessionStore();
+        const cancel = jest.fn(async () => {
+            throw new Error('task state cleaned up');
+        });
+        const runtimeDriver = {
+            enqueueStart: jest.fn(async () => undefined),
+            enqueueResume: jest.fn(async () => undefined),
+            enqueueChildDispatch: jest.fn(async () => undefined),
+            scheduleTimer: jest.fn(async () => ({ timerId: 'timer-1' })),
+            cancel,
+            dispatchOutbox: jest.fn(async () => undefined),
+        };
+        const engine = new TaskEngine({
+            sessionStore: store as any,
+            handlerInvoker: { invoke: jest.fn() } as any,
+            runtimeDriver: runtimeDriver as any,
+        });
+        store.seed('t', 'task-cancel-provider-fails', {
+            meta: { agentId: 'agent-a', awaiting: { kind: 'await_child', token: 'child-token' } },
+        }, BigInt(0), 'agent-a');
+
+        await expect(engine.cancelTask({
+            tenantId: 't',
+            taskId: 'task-cancel-provider-fails',
+            agentId: 'agent-a',
+            reason: 'operator stop',
+        })).resolves.toEqual({ acknowledged: true });
+
+        expect(readSegmentCancellation(store.getSnapshot('t', 'task-cancel-provider-fails')?.snapshot)).toEqual({
+            requested: true,
+            reason: 'operator stop',
+            requestedAt: expect.any(String),
+        });
+        expect(store.getEvents('t', 'task-cancel-provider-fails').map((event) => event.type)).toEqual(['task.canceled']);
+        expect(cancel).toHaveBeenCalled();
+    });
+
+    test('awaitTaskTerminal durably cancels an active root at its deadline', async () => {
+        const store = new FakeSessionStore();
+        const cancel = jest.fn(async () => undefined);
+        const engine = new TaskEngine({
+            sessionStore: store as any,
+            handlerInvoker: { invoke: jest.fn() } as any,
+            runtimeDriver: {
+                enqueueStart: jest.fn(async () => undefined),
+                enqueueResume: jest.fn(async () => undefined),
+                enqueueChildDispatch: jest.fn(async () => undefined),
+                scheduleTimer: jest.fn(async () => ({ timerId: 'timer-1' })),
+                cancel,
+                dispatchOutbox: jest.fn(async () => undefined),
+            } as any,
+        });
+        store.seed('t', 'active-root', {
+            meta: {
+                agentId: 'agent-a',
+                taskLifecycle: {
+                    taskId: 'active-root',
+                    rootTaskId: 'active-root',
+                    ancestorTaskIds: [],
+                    state: 'active',
+                },
+                awaiting: { kind: 'await_child', token: 'child-1' },
+            },
+        }, BigInt(0), 'agent-a');
+        let clock = 1_000;
+
+        const result = await engine.awaitTaskTerminal({
+            tenantId: 't',
+            taskId: 'active-root',
+            agentId: 'agent-a',
+            timeoutMs: 50,
+            timeoutSource: 'test',
+            startedAtMs: clock,
+            pollIntervalMs: 10,
+            now: () => clock,
+            sleep: async (ms) => { clock += ms; },
+        });
+
+        expect(result.status).toMatchObject({
+            state: 'canceled',
+            metadata: {
+                reason: 'active_run_timeout',
+                code: 'TASK_RUN_TIMEOUT',
+                timeoutMs: 50,
+            },
+        });
+        expect((store.getSnapshot('t', 'active-root')?.snapshot as any).meta.taskLifecycle.state)
+            .toBe('canceled');
+        expect((store.getSnapshot('t', 'active-root')?.snapshot as any).meta.taskTerminal)
+            .toMatchObject({
+                state: 'canceled',
+                deliveryKey: 'active-root:terminal:canceled',
+                enqueuedAt: expect.any(String),
+            });
+        expect(store.getOutbox()).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+                topic: 'task.status',
+                key: 'active-root',
+                payload: expect.objectContaining({
+                    final: true,
+                    deliveryKey: 'active-root:terminal:canceled',
+                }),
+            }),
+        ]));
+        expect(cancel).toHaveBeenCalledWith(expect.objectContaining({
+            taskId: 'active-root',
+            reason: 'active_run_timeout',
+        }));
+    });
+
+    test('root deadline fails an unresolved worker recovery with a stable infrastructure code', async () => {
+        const store = new FakeSessionStore();
+        const engine = new TaskEngine({
+            sessionStore: store as any,
+            handlerInvoker: { invoke: jest.fn() } as any,
+            runtimeDriver: {
+                enqueueStart: jest.fn(async () => undefined), enqueueResume: jest.fn(async () => undefined),
+                enqueueChildDispatch: jest.fn(async () => undefined),
+                scheduleTimer: jest.fn(async () => ({ timerId: 'timer-1' })),
+                cancel: jest.fn(async () => undefined), dispatchOutbox: jest.fn(async () => undefined),
+            } as any,
+        });
+        const sourceClaim = {
+            claimId: 'claim-old', fence: '1', ownerId: 'worker-old', requestKey: 'worker-root:start',
+            claimedGeneration: '1', turnSeq: 1, phase: 'executing', runtimeSurface: 'hatchet',
+            acquiredAt: '1970-01-01T00:00:00.900Z', heartbeatAt: '1970-01-01T00:00:00.950Z',
+            expiresAt: '1970-01-01T00:02:00.000Z',
+        };
+        store.seed('t', 'worker-root', { meta: {
+            agentId: 'agent-a',
+            taskLifecycle: { taskId: 'worker-root', rootTaskId: 'worker-root', ancestorTaskIds: [], state: 'active' },
+            turnCoordinator: {
+                schemaVersion: 1, nextFence: '1', nextTurnSeq: 1,
+                requestedGeneration: '1', completedGeneration: '0', runtimeSurface: 'hatchet',
+                dispatchIntent: {
+                    generation: '1', turnSeq: 1, deliveryKey: 'worker-root:turn-request:1',
+                    runtimeSurface: 'hatchet', createdAt: '1970-01-01T00:00:00.960Z',
+                    recovery: { reason: 'worker_lifetime_lost', sourceClaim, stagedAt: '1970-01-01T00:00:00.960Z' },
+                },
+            },
+        } }, 0n, 'agent-a');
+        let clock = 1_000;
+        const result = await engine.awaitTaskTerminal({
+            tenantId: 't', taskId: 'worker-root', agentId: 'agent-a', timeoutMs: 50,
+            timeoutSource: 'test', startedAtMs: clock, pollIntervalMs: 10,
+            now: () => clock, sleep: async (ms) => { clock += ms; },
+        });
+        expect(result.status).toMatchObject({
+            state: 'failed', metadata: { code: 'HATCHET_WORKER_RECOVERY_DEADLINE_EXCEEDED' },
+        });
+    });
+
+    test('awaitTaskTerminal returns input-required without installing a run deadline', async () => {
+        const store = new FakeSessionStore();
+        const cancel = jest.fn(async () => undefined);
+        const engine = new TaskEngine({
+            sessionStore: store as any,
+            handlerInvoker: { invoke: jest.fn() } as any,
+            runtimeDriver: {
+                enqueueStart: jest.fn(async () => undefined),
+                enqueueResume: jest.fn(async () => undefined),
+                enqueueChildDispatch: jest.fn(async () => undefined),
+                scheduleTimer: jest.fn(async () => ({ timerId: 'timer-1' })),
+                cancel,
+                dispatchOutbox: jest.fn(async () => undefined),
+            } as any,
+        });
+        store.seed('t', 'input-root', {
+            meta: {
+                agentId: 'agent-a',
+                taskLifecycle: {
+                    taskId: 'input-root',
+                    rootTaskId: 'input-root',
+                    ancestorTaskIds: [],
+                    state: 'active',
+                },
+            },
+            pending: { inputs: { 'input-1': { status: 'pending' } } },
+        }, BigInt(0), 'agent-a');
+
+        const result = await engine.awaitTaskTerminal({
+            tenantId: 't',
+            taskId: 'input-root',
+            agentId: 'agent-a',
+            timeoutMs: 50,
+            timeoutSource: 'test',
+        });
+
+        expect(result).toMatchObject({
+            lifecycle: 'input-required',
+            status: { state: 'input-required', metadata: { token: 'input-1' } },
+        });
+        expect((store.getSnapshot('t', 'input-root')?.snapshot as any).meta.rootRunDeadline)
+            .toBeUndefined();
+        expect(cancel).not.toHaveBeenCalled();
+    });
+
+    test('cancelTask cannot replace an already completed durable lifecycle', async () => {
+        const store = new FakeSessionStore();
+        const cancel = jest.fn(async () => undefined);
+        const engine = new TaskEngine({
+            sessionStore: store as any,
+            handlerInvoker: { invoke: jest.fn() } as any,
+            runtimeDriver: {
+                enqueueStart: jest.fn(async () => undefined),
+                enqueueResume: jest.fn(async () => undefined),
+                enqueueChildDispatch: jest.fn(async () => undefined),
+                scheduleTimer: jest.fn(async () => ({ timerId: 'timer-1' })),
+                cancel,
+                dispatchOutbox: jest.fn(async () => undefined),
+            } as any,
+        });
+        store.seed('t', 'completed-root', {
+            meta: {
+                taskLifecycle: {
+                    taskId: 'completed-root',
+                    rootTaskId: 'completed-root',
+                    ancestorTaskIds: [],
+                    state: 'completed',
+                    changedAt: '2026-07-18T00:00:00.000Z',
+                },
+            },
+        }, BigInt(0), 'agent-a');
+
+        await engine.cancelTask({
+            tenantId: 't',
+            taskId: 'completed-root',
+            reason: 'active_run_timeout',
+            metadata: { code: 'TASK_RUN_TIMEOUT', timeoutMs: 50 },
+        });
+
+        expect((store.getSnapshot('t', 'completed-root')?.snapshot as any).meta.taskLifecycle.state)
+            .toBe('completed');
+        expect(store.getEvents('t', 'completed-root')).toEqual([]);
+        expect(cancel).not.toHaveBeenCalled();
+    });
+
+    test('cancelTask notifies an A2A parent and schedules async resume for child cancellation', async () => {
+        const store = new FakeSessionStore();
+        const cancel = jest.fn(async () => undefined);
+        const enqueueResume = jest.fn(async () => undefined);
+        const runtimeDriver = {
+            enqueueStart: jest.fn(async () => undefined),
+            enqueueResume,
+            enqueueChildDispatch: jest.fn(async () => undefined),
+            scheduleTimer: jest.fn(async () => ({ timerId: 'timer-1' })),
+            cancel,
+            dispatchOutbox: jest.fn(async () => undefined),
+        };
+        const engine = new TaskEngine({
+            sessionStore: store as any,
+            handlerInvoker: { invoke: jest.fn() } as any,
+            runtimeDriver: runtimeDriver as any,
+        });
+        store.seed(
+            't',
+            'parent-task',
+            setPendingTasks(
+                { meta: { agentId: 'parent-agent' } },
+                {
+                    'child-token': {
+                        childTaskId: 'child-task',
+                        target: 'child-agent',
+                    },
+                } as any
+            ),
+            BigInt(0),
+            'parent-agent'
+        );
+        store.seed('t', 'child-task', {
+            meta: {
+                agentId: 'child-agent',
+                a2aParent: {
+                    parentTenantId: 't',
+                    parentTaskId: 'parent-task',
+                    parentChildToken: 'child-token',
+                },
+            },
+        }, BigInt(0), 'child-agent');
+
+        await engine.cancelTask({
+            tenantId: 't',
+            taskId: 'child-task',
+            agentId: 'child-agent',
+            reason: 'operator child stop',
+        });
+
+        const parentEvents = store.getEvents('t', 'parent-task');
+        expect(parentEvents).toEqual([
+            expect.objectContaining({
+                type: 'task.child_failed',
+                payload: expect.objectContaining({
+                    token: 'child-token',
+                    error: expect.objectContaining({ code: 'CHILD_CANCELED' }),
+                }),
+            }),
+        ]);
+        expect(enqueueResume).toHaveBeenCalledWith({
+            tenantId: 't',
+            taskId: 'parent-task',
+            agentId: 'parent-agent',
+            token: 'child-token',
+            idempotencyKey: 'parent-task:child:child-token',
+            event: {
+                kind: 'child',
+                token: 'child-token',
+                childTaskId: 'child-task',
+                outcome: 'failed',
+                error: {
+                    code: 'CHILD_CANCELED',
+                    message: 'Child task canceled: operator child stop',
+                },
+                completedAt: expect.any(String),
+                terminalClaimed: true,
+            },
+        });
+        expect(cancel).toHaveBeenCalledWith(expect.objectContaining({
+            tenantId: 't',
+            taskId: 'child-task',
+            agentId: 'child-agent',
+            reason: 'operator child stop',
+        }));
+    });
+
+    test('cancelTask is a no-op when cancellation was already requested', async () => {
+        const store = new FakeSessionStore();
+        const cancel = jest.fn(async () => undefined);
+        const runtimeDriver = {
+            enqueueStart: jest.fn(async () => undefined),
+            enqueueResume: jest.fn(async () => undefined),
+            enqueueChildDispatch: jest.fn(async () => undefined),
+            scheduleTimer: jest.fn(async () => ({ timerId: 'timer-1' })),
+            cancel,
+            dispatchOutbox: jest.fn(async () => undefined),
+        };
+        const engine = new TaskEngine({
+            sessionStore: store as any,
+            handlerInvoker: { invoke: jest.fn() } as any,
+            runtimeDriver: runtimeDriver as any,
+        });
+        store.seed('t', 'task-cancel-twice', {
+            meta: {
+                agentId: 'agent-a',
+                cancellation: {
+                    requested: true,
+                    reason: 'first stop',
+                    requestedAt: '2026-06-19T00:00:00.000Z',
+                },
+            },
+        }, BigInt(0), 'agent-a');
+
+        await engine.cancelTask({
+            tenantId: 't',
+            taskId: 'task-cancel-twice',
+            agentId: 'agent-a',
+            reason: 'second stop',
+        });
+
+        const persisted = store.getSnapshot('t', 'task-cancel-twice');
+        expect(readSegmentCancellation(persisted?.snapshot)).toEqual({
+            requested: true,
+            reason: 'first stop',
+            requestedAt: '2026-06-19T00:00:00.000Z',
+        });
+        expect(cancel).not.toHaveBeenCalled();
+        expect(store.writeCount).toBe(0);
+    });
+
+    test('cancelTask is a no-op after a terminal task event', async () => {
+        const store = new FakeSessionStore();
+        const cancel = jest.fn(async () => undefined);
+        const runtimeDriver = {
+            enqueueStart: jest.fn(async () => undefined),
+            enqueueResume: jest.fn(async () => undefined),
+            enqueueChildDispatch: jest.fn(async () => undefined),
+            scheduleTimer: jest.fn(async () => ({ timerId: 'timer-1' })),
+            cancel,
+            dispatchOutbox: jest.fn(async () => undefined),
+        };
+        const engine = new TaskEngine({
+            sessionStore: store as any,
+            handlerInvoker: { invoke: jest.fn() } as any,
+            runtimeDriver: runtimeDriver as any,
+        });
+        store.seed('t', 'task-complete', {
+            meta: { agentId: 'agent-a' },
+        }, BigInt(0), 'agent-a');
+        await store.appendEvent({
+            tenantId: 't',
+            sessionId: 'task-complete',
+            type: 'task.completed',
+            payload: { resultPreview: { ok: true } },
+        });
+
+        await engine.cancelTask({
+            tenantId: 't',
+            taskId: 'task-complete',
+            agentId: 'agent-a',
+            reason: 'too late',
+        });
+
+        const persisted = store.getSnapshot('t', 'task-complete');
+        expect(readSegmentCancellation(persisted?.snapshot)).toBeUndefined();
+        expect(cancel).not.toHaveBeenCalled();
+        expect(store.writeCount).toBe(0);
+    });
+
     test('stages child completion with CAS retry and deduplication', async () => {
         const store = new FakeSessionStore();
         const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
@@ -241,7 +841,42 @@ describe('TaskEngine orchestration coverage', () => {
         const matchingAll = inbox.all.filter(o => o.kind === 'child.completed' && (o as any)?.payload?.token === 'tok-1');
         expect(matchingAll).toHaveLength(1);
         expect(inbox.current.some(o => o.kind === 'child.completed' && (o as any)?.payload?.token === 'tok-1')).toBe(true);
-        expect((snap?.snapshot as any).pending?.tasks?.['tok-1']).toBeDefined();
+        expect((snap?.snapshot as any).pending?.tasks?.['tok-1']).toBeUndefined();
+        expect((snap?.snapshot as any).pending?.childTerminals?.['tok-1']).toEqual(
+            expect.objectContaining({ kind: 'completed' })
+        );
+    });
+
+    test('stageChildCompletionObservation stores large child HTML as artifact-backed snapshot data', async () => {
+        const rawHtml = `<html>${'stage-child-raw-html'.repeat(5000)}</html>`;
+        const store = new FakeSessionStore();
+        (store as any).prisma = createFakeArtifactPrisma();
+        const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
+        const pending = setPendingTasks({}, { 'tok-large': { handlers: {} } });
+        const base = { ...pending, meta: { turn: 0 }, inbox: { current: [], all: [] } } as Record<string, unknown>;
+        store.seed('t', 'parent-large', base, BigInt(0), 'parent-agent');
+
+        await engine.stageChildCompletionObservation({
+            tenantId: 't',
+            parentTaskId: 'parent-large',
+            childToken: 'tok-large',
+            result: { ok: true, data: { html: rawHtml, content: rawHtml } },
+            childAgentId: 'child-agent'
+        });
+
+        const saved = store.getSnapshot('t', 'parent-large')?.snapshot as any;
+        const serialized = JSON.stringify(saved);
+        expect(serialized).not.toContain(rawHtml);
+        const obs = normalizeObservationInbox<ObservationConfig & { user: unknown; tool: unknown; child: unknown }>(saved.inbox)
+            .all.find((entry: any) => entry?.payload?.token === 'tok-large') as any;
+        expect(obs?.payload?.result?.data?.html).toEqual(expect.objectContaining({
+            kind: 'artifact',
+            mimeType: 'text/html',
+        }));
+        expect(obs?.payload?.result?.data?.content).toEqual(expect.objectContaining({
+            kind: 'artifact',
+            mimeType: 'text/html',
+        }));
     });
 
     test('resumes awaiting child and clears mappings/control vars', async () => {
@@ -671,14 +1306,7 @@ describe('TaskEngine orchestration coverage', () => {
         const initialSnap = store.getSnapshot('t', 'parent');
         const initialTurn = Number(((initialSnap?.snapshot as any)?.meta?.turn) ?? 0);
 
-        runLoopMock.mockImplementation(async () => {
-            console.log('runLoopMock invoked');
-            return {
-                M: { memory: { vars: {} } },
-                outcome: { kind: 'complete', result: {} },
-                metrics: {}
-            };
-        });
+        const executeTurnSpy = mockLegacyInlineParentResume();
 
         await engine.handleChildCompleted({
             tenantId: 't',
@@ -692,6 +1320,7 @@ describe('TaskEngine orchestration coverage', () => {
         const savedMeta = ((afterSnap?.snapshot as any)?.meta || {}) as Record<string, unknown>;
         const afterTurn = Number(savedMeta.turn ?? 0);
 
+        expect(executeTurnSpy).toHaveBeenCalledTimes(1);
         expect(afterTurn).toBeGreaterThan(initialTurn);
         expect((savedPending as any)?.tasks?.['child-1']).toBeUndefined();
         expect((savedMeta as any)?.awaiting).toBeUndefined();
@@ -704,11 +1333,7 @@ describe('TaskEngine orchestration coverage', () => {
         jest.spyOn(engine as any, 'attachWorkingMemory').mockResolvedValue(undefined as any);
         jest.spyOn(engine as any, 'attachAndRestoreLLM').mockResolvedValue(undefined as any);
 
-        runLoopMock.mockResolvedValue({
-            M: { memory: { vars: {} } },
-            outcome: { kind: 'complete', result: {} },
-            metrics: {}
-        });
+        const executeTurnSpy = mockLegacyInlineParentResume();
 
         const pending = setPendingTasks({
             meta: { turn: 2, agentId: 'agent-a' },
@@ -741,12 +1366,13 @@ describe('TaskEngine orchestration coverage', () => {
         const savedMeta = ((afterSnap?.snapshot as any)?.meta || {}) as Record<string, unknown>;
         const afterTurn = Number(savedMeta.turn ?? 0);
 
+        expect(executeTurnSpy).toHaveBeenCalledTimes(1);
         expect(afterTurn).toBeGreaterThan(initialTurn);
         expect((savedPending as any)?.tasks?.['child-early']).toBeUndefined();
         expect((savedMeta as any)?.awaiting).toBeUndefined();
     });
 
-    test('await_child resumes when pending entry removed before metadata saved', async () => {
+    test('await_child ignores completion when pending entry was already removed', async () => {
         class EntryClearingStore extends FakeSessionStore {
             private loadCount = 0;
             async getSessionSnapshot(tenantId: string, sessionId: string): Promise<WMSessionSnapshot | null> {
@@ -770,11 +1396,7 @@ describe('TaskEngine orchestration coverage', () => {
         jest.spyOn(engine as any, 'attachWorkingMemory').mockResolvedValue(undefined as any);
         jest.spyOn(engine as any, 'attachAndRestoreLLM').mockResolvedValue(undefined as any);
 
-        runLoopMock.mockResolvedValue({
-            M: { memory: { vars: {} } },
-            outcome: { kind: 'complete', result: {} },
-            metrics: {}
-        });
+        const executeTurnSpy = mockLegacyInlineParentResume();
 
         const pending = setPendingTasks({
             meta: { turn: 2, agentId: 'agent-a' },
@@ -806,19 +1428,19 @@ describe('TaskEngine orchestration coverage', () => {
         const savedMeta = ((afterSnap?.snapshot as any)?.meta || {}) as Record<string, unknown>;
         const afterTurn = Number(savedMeta.turn ?? 0);
 
-        expect(afterTurn).toBeGreaterThan(initialTurn);
+        expect(executeTurnSpy).toHaveBeenCalledTimes(0);
+        expect(afterTurn).toBe(initialTurn);
         expect((afterSnap?.snapshot as any)?.pending?.tasks?.['child-early']).toBeUndefined();
         expect((savedMeta as any)?.awaiting).toBeUndefined();
     });
 
-    test('await_child resumes even when awaiting metadata and pending entry removed', async () => {
+    test('await_child does not resume from awaiting metadata after its pending entry is removed', async () => {
         class AwaitingDroppingStore extends FakeSessionStore {
             private loadCount = 0;
             async getSessionSnapshot(tenantId: string, sessionId: string): Promise<WMSessionSnapshot | null> {
                 const snap = await super.getSessionSnapshot(tenantId, sessionId);
                 if (!snap) return snap;
                 this.loadCount++;
-                console.log('AwaitingDroppingStore snapshot load', this.loadCount);
                 if (this.loadCount === 2) {
                     const mutated = JSON.parse(JSON.stringify(snap.snapshot));
                     if (mutated.meta) {
@@ -841,11 +1463,7 @@ describe('TaskEngine orchestration coverage', () => {
         jest.spyOn(engine as any, 'attachWorkingMemory').mockResolvedValue(undefined as any);
         jest.spyOn(engine as any, 'attachAndRestoreLLM').mockResolvedValue(undefined as any);
 
-        runLoopMock.mockResolvedValue({
-            M: { memory: { vars: {} } },
-            outcome: { kind: 'complete', result: {} },
-            metrics: {}
-        });
+        const executeTurnSpy = mockLegacyInlineParentResume();
 
         const base = {
             meta: { turn: 2, agentId: 'agent-a', awaiting: { kind: 'await_child', token: 'child-1' } },
@@ -869,12 +1487,13 @@ describe('TaskEngine orchestration coverage', () => {
         const savedMeta = ((afterSnap?.snapshot as any)?.meta || {}) as Record<string, unknown>;
         const afterTurn = Number(savedMeta.turn ?? 0);
 
-        expect(afterTurn).toBeGreaterThan(initialTurn);
+        expect(executeTurnSpy).toHaveBeenCalledTimes(0);
+        expect(afterTurn).toBe(initialTurn);
     });
 
     test('offloadArtifacts deduplicates repeated LocalArtifacts', async () => {
         const spy = jest.fn<any>().mockResolvedValue({ artifactId: 'art-1', size: 123 });
-        const cache = { storeArtifact: spy };
+        const cache = { storeArtifact: spy, publishArtifact: spy };
         const artifact = new LocalArtifactImpl('<html>1</html>', 'text/html');
         const payload = {
             first: artifact,
@@ -991,7 +1610,7 @@ describe('TaskEngine orchestration coverage', () => {
         expect(merged.current.some(o => (o as any)?.payload?.token === 'b')).toBe(true);
     });
 
-    test('attachAndRestoreLLM can be overridden for tests', async () => {
+    test('tool wake routing does not construct a second prepared context in TaskEngine', async () => {
         const store = new FakeSessionStore();
         const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
         const override = jest.fn().mockResolvedValue(undefined);
@@ -1008,7 +1627,7 @@ describe('TaskEngine orchestration coverage', () => {
         store.seed('t', 'task', pendingTools as any, BigInt(0), 'agent-a');
 
         await engine.handleToolCompleted({ tenantId: 't', taskId: 'task', token: 'tool-1', result: { ok: true } });
-        expect(override).toHaveBeenCalled();
+        expect(override).not.toHaveBeenCalled();
     });
     test('handles child completion without re-running loop when awaiting different token', async () => {
         const store = new FakeSessionStore();
@@ -1098,6 +1717,213 @@ describe('TaskEngine orchestration coverage', () => {
             logSpy.mockRestore();
             process.env.DEBUG_BACKGROUND_TASKS = original;
         });
+
+        test('waitForBackgroundTasks names tracked pending background tasks on timeout', async () => {
+            const engine = new TaskEngine({ sessionStore: new FakeSessionStore() as any, handlerInvoker: { invoke: jest.fn() } as any });
+            const pending = new Promise<void>(() => undefined);
+            const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => { });
+
+            (engine as any).trackBackgroundTask(pending, {
+                kind: 'tool.auto_execute',
+                label: 'tool.auto_execute mcp:browser-use',
+                tenantId: 'default',
+                taskId: 'task-1',
+                agentId: 'fetch-browser',
+                token: 'tool-token-1',
+                toolName: 'mcp:browser-use',
+                source: 'ApiBinder.requestTool',
+            });
+
+            try {
+                await expect(engine.waitForBackgroundTasks(5, { throwOnTimeout: true })).rejects.toThrow(
+                    /tool\.auto_execute mcp:browser-use[\s\S]*tool-token-1/
+                );
+            } finally {
+                warnSpy.mockRestore();
+            }
+        });
+
+        test('root drain ignores durably detached nested tools and requests abort', async () => {
+            const engine = new TaskEngine({ sessionStore: new FakeSessionStore() as any, handlerInvoker: { invoke: jest.fn() } as any });
+            const pending = new Promise<void>(() => undefined);
+            const abort = jest.fn();
+
+            (engine as any).trackBackgroundTask(pending, {
+                kind: 'tool.auto_execute',
+                tenantId: 'default',
+                taskId: 'child-1',
+                rootTaskId: 'root-1',
+                ancestorTaskIds: ['root-1'],
+                token: 'tool-token-1',
+                toolName: 'mcp:browser-use.navigate_and_extract',
+                abort,
+            });
+
+            expect((engine as any).detachBackgroundTasks({
+                taskId: 'child-1',
+                reason: 'child_timeout',
+            })).toBe(1);
+            await Promise.resolve();
+
+            const report = await engine.drainBackgroundTasks({
+                rootTaskId: 'root-1',
+                timeoutMs: 10,
+                throwOnTimeout: true,
+            });
+            expect(report).toMatchObject({ activeCount: 0, detachedCount: 1 });
+            expect(abort).toHaveBeenCalledTimes(1);
+        });
+
+        test('root drain does not wait for active work owned by a different root', async () => {
+            const engine = new TaskEngine({ sessionStore: new FakeSessionStore() as any, handlerInvoker: { invoke: jest.fn() } as any });
+            (engine as any).trackBackgroundTask(new Promise<void>(() => undefined), {
+                kind: 'tool.auto_execute',
+                taskId: 'other-child',
+                rootTaskId: 'other-root',
+                token: 'other-tool',
+            });
+
+            await expect(engine.drainBackgroundTasks({
+                rootTaskId: 'current-root',
+                timeoutMs: 10,
+                throwOnTimeout: true,
+            })).resolves.toMatchObject({ activeCount: 0 });
+        });
+
+        test('root drain ignores conversation activation bookkeeping for another task', async () => {
+            const engine = new TaskEngine({ sessionStore: new FakeSessionStore() as any, handlerInvoker: { invoke: jest.fn() } as any });
+            (engine as any).activeConversationActivations.add('default:completed-child');
+
+            await expect(engine.drainBackgroundTasks({
+                rootTaskId: 'completed-root',
+                timeoutMs: 10,
+                throwOnTimeout: true,
+            })).resolves.toMatchObject({
+                activeCount: 0,
+                activeConversationActivations: [],
+            });
+        });
+
+        test('owned effects are registered before their provider factory can start', async () => {
+            const store = new FakeSessionStore();
+            store.seed('t', 'task-1', {
+                meta: {
+                    taskLifecycle: {
+                        taskId: 'task-1',
+                        rootTaskId: 'task-1',
+                        ancestorTaskIds: [],
+                        state: 'active',
+                    },
+                },
+                pending: { tools: { 'tool-1': { name: 'slow-tool' } } },
+            }, BigInt(1));
+            const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
+            const provider = jest.fn(async () => 'done');
+
+            const result = (engine as any).runOwnedEffect(provider, {
+                kind: 'tool.auto_execute',
+                tenantId: 't',
+                taskId: 'task-1',
+                rootTaskId: 'task-1',
+                token: 'tool-1',
+                pendingKind: 'tools',
+            });
+
+            expect(provider).not.toHaveBeenCalled();
+            expect(Array.from((engine as any).backgroundTaskMetadata.values()))
+                .toEqual([expect.objectContaining({ state: 'registering', token: 'tool-1' })]);
+            await expect(result).resolves.toBe('done');
+            expect(provider).toHaveBeenCalledTimes(1);
+        });
+
+        test('owned effects suppress provider start under an already detached owner', async () => {
+            const store = new FakeSessionStore();
+            store.seed('t', 'task-1', {
+                meta: {
+                    taskLifecycle: {
+                        taskId: 'task-1',
+                        rootTaskId: 'task-1',
+                        ancestorTaskIds: [],
+                        state: 'detached',
+                        reason: 'child_timeout',
+                    },
+                },
+                pending: { tools: { 'tool-1': { name: 'slow-tool' } } },
+            }, BigInt(1));
+            const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
+            const provider = jest.fn(async () => 'must-not-run');
+
+            await expect((engine as any).runOwnedEffect(provider, {
+                kind: 'tool.auto_execute',
+                tenantId: 't',
+                taskId: 'task-1',
+                rootTaskId: 'task-1',
+                token: 'tool-1',
+                pendingKind: 'tools',
+            })).rejects.toMatchObject({ code: 'TASK_LIFECYCLE_TERMINAL' });
+            expect(provider).not.toHaveBeenCalled();
+            expect((store.getSnapshot('t', 'task-1')?.snapshot as any).pending.tools['tool-1']).toBeUndefined();
+        });
+
+        test('drain reconciliation detaches work after a remote lifecycle claim', async () => {
+            const store = new FakeSessionStore();
+            const active = {
+                meta: {
+                    taskLifecycle: {
+                        taskId: 'task-1',
+                        rootTaskId: 'root-1',
+                        ancestorTaskIds: ['root-1'],
+                        state: 'active',
+                    },
+                },
+                pending: { tools: { 'tool-1': { name: 'slow-tool' } } },
+            };
+            store.seed('t', 'task-1', active, BigInt(1));
+            const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
+            const provider = jest.fn(({ signal }: { signal: AbortSignal }) => new Promise<void>((_resolve, reject) => {
+                signal.addEventListener('abort', () => {
+                    const error = new Error('aborted');
+                    error.name = 'AbortError';
+                    reject(error);
+                }, { once: true });
+            }));
+            const running = (engine as any).runOwnedEffect(provider, {
+                kind: 'tool.auto_execute',
+                tenantId: 't',
+                taskId: 'task-1',
+                rootTaskId: 'root-1',
+                ancestorTaskIds: ['root-1'],
+                token: 'tool-1',
+                pendingKind: 'tools',
+            });
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            const current = store.getSnapshot('t', 'task-1')!;
+            await store.writeSnapshotCAS({
+                tenantId: 't',
+                sessionId: 'task-1',
+                agentId: 'agent',
+                expectedWmVersion: current.wmVersion,
+                snapshot: {
+                    ...(current.snapshot as any),
+                    meta: {
+                        ...(current.snapshot as any).meta,
+                        taskLifecycle: {
+                            ...(current.snapshot as any).meta.taskLifecycle,
+                            state: 'detached',
+                            reason: 'remote_timeout',
+                        },
+                    },
+                },
+            });
+
+            await expect(engine.drainBackgroundTasks({
+                rootTaskId: 'root-1',
+                timeoutMs: 500,
+                throwOnTimeout: true,
+            })).resolves.toMatchObject({ activeCount: 0 });
+            await expect(running).rejects.toThrow('aborted');
+            expect(provider).toHaveBeenCalledTimes(1);
+        });
     });
 
     test('handles tool completion, persists observation, and resumes once', async () => {
@@ -1152,6 +1978,32 @@ describe('TaskEngine orchestration coverage', () => {
         const snap = store.getSnapshot('t', 'parent');
         const inbox = normalizeObservationInbox<ObservationConfig & { user: unknown; tool: unknown; child: unknown }>((snap?.snapshot as any)?.inbox);
         expect(inbox.all.filter(o => (o as any)?.payload?.token === 'child-dup')).toHaveLength(1);
+        expect((snap?.snapshot as any).pending?.childTerminals?.['child-dup']).toEqual(
+            expect.objectContaining({ kind: 'completed' })
+        );
+        expect(store.writeCount).toBe(1);
+    });
+
+    test('late handler registration cannot resurrect a terminal child token', async () => {
+        const store = new FakeSessionStore();
+        store.seed('t', 'parent', {
+            pending: {
+                tasks: {},
+                childTerminals: {
+                    'child-terminal': {
+                        kind: 'completed',
+                        claimedAt: '2026-07-15T00:00:00.000Z',
+                    },
+                },
+            },
+        }, BigInt(1), 'agent-a');
+
+        const handle = new TaskHandle(new SessionManager(store), 't', 'parent', 'child-terminal');
+        await handle.onCompleted('afterTerminal');
+
+        const snap = store.getSnapshot('t', 'parent');
+        expect((snap?.snapshot as any).pending.tasks).not.toHaveProperty('child-terminal');
+        expect((snap?.snapshot as any).pending.childTerminals).toHaveProperty('child-terminal');
         expect(store.writeCount).toBe(0);
     });
 
@@ -1189,10 +2041,101 @@ describe('TaskEngine orchestration coverage', () => {
         const saved = store.getSnapshot('t', 'session')?.snapshot as any;
         const token = Object.keys((saved?.pending as any)?.tasks || {})[0];
         expect(ctx.__activeLoopInbox.current.some((o: any) => o?.payload?.token === token)).toBe(true);
-        expect(ctx.__activeLoopEnv.pending.children[token]).toBeDefined();
+        expect(ctx.__activeLoopEnv.pending.children[token]).toBeUndefined();
     });
 
-    test('restoreCtx durable sendTaskToAgent falls back to handleChildCompleted when no active inbox', async () => {
+    test('restoreCtx async immediate child terminal stages a wake without inline inbox injection', async () => {
+        const sendMock = jest.spyOn(globalA2AService, 'sendTaskToAgent').mockResolvedValue({ status: 'completed', value: 5 });
+        const store = new FakeSessionStore();
+        const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
+        const { EngineLocator } = await import('../src/orchestration/EngineLocator.js');
+        EngineLocator.setEngine(engine);
+
+        store.seed('t', 'session', {
+            meta: {
+                agentId: 'agent-a',
+                taskLifecycle: {
+                    taskId: 'session',
+                    rootTaskId: 'session',
+                    ancestorTaskIds: [],
+                    state: 'active',
+                },
+                turnCoordinator: {
+                    schemaVersion: 1,
+                    nextFence: '1',
+                    nextTurnSeq: 1,
+                    requestedGeneration: '0',
+                    completedGeneration: '0',
+                },
+            },
+            inbox: { current: [], all: [] },
+            pending: {},
+            M: { memory: { vars: {} } },
+        } as any, BigInt(0), 'agent-a');
+
+        // Exercise the non-runtime compatibility boundary where dispatch itself
+        // resolves terminally. It must still use async_wake semantics.
+        (engine as any).apiBinder.deps.enqueueChildStart = undefined;
+        const ctx: any = await (engine as any).restoreCtx('t', 'session');
+        ctx.__activeLoopInbox = normalizeObservationInbox<ObservationConfig & { user: unknown; tool: unknown; child: unknown }>({ current: [], all: [] });
+        ctx.__activeLoopEnv = { turn: 1, pending: { children: {}, inputs: {}, tools: {}, groups: {} } };
+
+        const dispatch = await ctx.sendTaskToAgent('child-agent', { input: 1 }, { awaitCompletion: false });
+
+        expect(sendMock).toHaveBeenCalled();
+        expect(ctx.__activeLoopInbox.current).toHaveLength(0);
+        expect(ctx.__activeLoopInbox.all).toHaveLength(0);
+        const saved = store.getSnapshot('t', 'session')?.snapshot as any;
+        expect(saved.meta.turnCoordinator.requestedGeneration).toBe('1');
+        expect(saved.meta.turnCoordinator.dispatchIntent).toEqual(expect.objectContaining({ generation: '1' }));
+        expect(saved.inbox.all).toContainEqual(expect.objectContaining({
+            kind: 'child.completed',
+            payload: expect.objectContaining({ token: dispatch.token }),
+        }));
+    });
+
+    test('restoreCtx durable sendTaskToAgent does not complete a still-working child', async () => {
+        const sendMock = jest.spyOn(globalA2AService, 'sendTaskToAgent').mockResolvedValue({
+            id: 'child-task-id',
+            input: { input: 1 },
+            status: {
+                state: 'working',
+                timestamp: new Date().toISOString(),
+            },
+        });
+
+        const store = new FakeSessionStore();
+        const engine = new TaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
+        const { EngineLocator } = await import('../src/orchestration/EngineLocator.js');
+        EngineLocator.setEngine(engine);
+
+        const base = { meta: { agentId: 'agent-a' }, inbox: { current: [], all: [] }, pending: {}, M: { memory: { vars: {} } } };
+        store.seed('t', 'session', base as any, BigInt(0), 'agent-a');
+        const ctx: any = await (engine as any).restoreCtx('t', 'session');
+        ctx.__activeLoopInbox = normalizeObservationInbox<ObservationConfig & { user: unknown; tool: unknown; child: unknown }>({ current: [], all: [] });
+        ctx.__activeLoopEnv = { turn: 1, pending: { children: {}, inputs: {}, tools: {}, groups: {} } };
+        const handleChildSpy = jest.spyOn(engine as any, 'handleChildCompleted');
+
+        const result = await ctx.sendTaskToAgent('child-agent', { input: 1 }, { setToken: true, setStage: 'child-await', autoClearToken: false });
+
+        expect(result.handle).toBeDefined();
+        expect(result.handle.status?.state).toBe('working');
+        expect(sendMock).toHaveBeenCalledWith(
+            expect.any(Object),
+            'child-agent',
+            expect.objectContaining({ input: 1 }),
+            expect.objectContaining({ parentTenantId: 't', parentTaskId: 'session', skipParentNotification: true })
+        );
+        expect(handleChildSpy).not.toHaveBeenCalled();
+        expect(ctx.__activeLoopInbox.current).toHaveLength(0);
+        expect(ctx.__activeLoopInbox.all).toHaveLength(0);
+
+        const events = store.getEvents('t', 'session');
+        expect(events.some((event) => event.type === 'task.child_started')).toBe(true);
+        expect(events.some((event) => event.type === 'task.child_completed')).toBe(false);
+    });
+
+    test('restoreCtx blocking sendTaskToAgent does not publish a second async completion without an active inbox', async () => {
         // Use spyOn instead of module mocking to avoid Jest ESM issues
         const sendMock = jest.spyOn(globalA2AService, 'sendTaskToAgent').mockResolvedValue({ status: 'completed', value: 5 });
 
@@ -1210,7 +2153,7 @@ describe('TaskEngine orchestration coverage', () => {
 
         await ctx.sendTaskToAgent('child-agent', { input: 'test' }, { setToken: 'child-1' });
 
-        expect(handleChildSpy).toHaveBeenCalled();
+        expect(handleChildSpy).not.toHaveBeenCalled();
     });
 
     test('startTask injects initial input into inbox for agent perception', async () => {
@@ -1254,16 +2197,19 @@ describe('TaskEngine orchestration coverage', () => {
         expect(capturedParams.trigger).toBe('start');
     });
 
-    test('startTask passes manifestProvenance to runLoop', async () => {
+    test('startTask passes manifestProvenance to TurnRunner context', async () => {
         const { TaskEngine: MockedTaskEngine } = await loadEngineWithA2AMock({});
         const store = new FakeSessionStore();
         const engine = new MockedTaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
-
-        runLoopMock.mockResolvedValue({
-            M: { memory: { vars: {} } },
-            outcome: { kind: 'complete', result: { ok: true } },
-            metrics: { timings: {} },
-        });
+        const baseCtx = createCtx();
+        jest.spyOn(engine as any, 'createContext').mockReturnValue(baseCtx);
+        jest.spyOn(engine as any, 'attachWorkingMemory').mockResolvedValue(undefined as any);
+        jest.spyOn(engine as any, 'attachAndRestoreLLM').mockResolvedValue(undefined as any);
+        const runTurn = jest.spyOn((engine as any).turnRunner, 'runTurn').mockResolvedValue({
+            id: 'provenance-task',
+            input: { test: true },
+            status: { state: 'completed', timestamp: new Date().toISOString() },
+        } as any);
 
         const task = {
             id: 'provenance-task',
@@ -1278,14 +2224,49 @@ describe('TaskEngine orchestration coverage', () => {
             tenantId: 't',
         });
 
-        expect(runLoopMock).toHaveBeenCalled();
-        const loopOpts = runLoopMock.mock.calls[0]?.[4] as { manifestProvenance?: { agentCardSource: string; runtimeManifestSource: string; agentCardHash: string; runtimeManifestHash: string } } | undefined;
-        expect(loopOpts?.manifestProvenance).toBeDefined();
-        expect(loopOpts!.manifestProvenance).toMatchObject({
+        expect(runTurn).toHaveBeenCalled();
+        const runTurnCtx = runTurn.mock.calls[0]?.[0] as { __manifestProvenance?: { agentCardSource: string; runtimeManifestSource: string; agentCardHash: string; runtimeManifestHash: string } } | undefined;
+        expect(runTurnCtx?.__manifestProvenance).toBeDefined();
+        expect(runTurnCtx!.__manifestProvenance).toMatchObject({
             agentCardSource: expect.any(String),
             runtimeManifestSource: expect.any(String),
             agentCardHash: expect.any(String),
             runtimeManifestHash: expect.any(String),
+        });
+    });
+
+    test('startTask delegates prepared context to TurnRunner for loop execution', async () => {
+        const { TaskEngine: MockedTaskEngine } = await loadEngineWithA2AMock({});
+        const store = new FakeSessionStore();
+        const engine = new MockedTaskEngine({ sessionStore: store as any, handlerInvoker: { invoke: jest.fn() } as any });
+        const baseCtx = createCtx();
+        jest.spyOn(engine as any, 'createContext').mockReturnValue(baseCtx);
+        jest.spyOn(engine as any, 'attachWorkingMemory').mockResolvedValue(undefined as any);
+        jest.spyOn(engine as any, 'attachAndRestoreLLM').mockResolvedValue(undefined as any);
+        const runTurn = jest.spyOn((engine as any).turnRunner, 'runTurn').mockResolvedValue({
+            id: 'conversation-api-task',
+            input: { test: true },
+            status: { state: 'completed', timestamp: new Date().toISOString() },
+        } as any);
+
+        await engine.startTask({
+            task: {
+                id: 'conversation-api-task',
+                input: { test: true },
+                status: { state: 'submitted' as const, timestamp: new Date().toISOString() },
+            },
+            isStreaming: false,
+            agentId: 'test-agent',
+            tenantId: 't',
+        });
+
+        expect(runTurn).toHaveBeenCalled();
+        const [runTurnCtx, turnParams] = runTurn.mock.calls[0] as [{ task?: { id?: string }; tenantId?: string; agentId?: string }, { sessionId?: string; tenantId?: string; trigger?: string }];
+        expect(runTurnCtx).toBe(baseCtx);
+        expect(turnParams).toMatchObject({
+            sessionId: 'conversation-api-task',
+            tenantId: 't',
+            trigger: 'start',
         });
     });
 

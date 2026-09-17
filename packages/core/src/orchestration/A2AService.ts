@@ -18,16 +18,60 @@ import { logger, withLoggingContext } from '@a2arium/callagent-utils';
 import { createLLMForTask } from '../llm/LLMFactory.js';
 import { AgentResultCache } from '@a2arium/callagent-memory-engine';
 import { EngineLocator } from './EngineLocator.js';
-import { eventBus } from '../eventbus/inMemoryEventBus.js';
+import { createBusEvent } from '../eventbus/busEventHelpers.js';
 import { getPendingInputs, setPendingInputs } from './DurableHandlerRegistry.js';
 import * as uuid from 'uuid';
-const uuidv4 = uuid.v4;
+const uuidv7 = uuid.v7;
 import { taskChannel } from '../eventbus/taskEventEmitter.js';
 import type { TaskEngine } from './taskEngine.js';
 import { ArtifactHydrationService } from './ArtifactHydrationService.js';
 import { getCallChainTracker, type CallChainTracker } from './CallChainTracker.js';
+import { AgentNode } from '../telemetry/nodes/AgentNode.js';
+import { telemetry } from '../telemetry/TelemetryCollector.js';
+import { attachA2aResultTelemetry } from './api/a2aResultTelemetry.js';
+import {
+    RUNTIME_STREAM_EVENT_VERSION,
+    RuntimeStreamEventSchema,
+    type RuntimeStreamMessagePart,
+} from '../streaming/runtimeStreamEvents.js';
 
 const a2aLogger = logger.createLogger({ prefix: 'A2AService' });
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isTaskEntityLike(value: unknown): value is {
+    id: string;
+    status?: { state?: string; metadata?: { result?: unknown } };
+} {
+    return isRecord(value) && typeof value.id === 'string' && isRecord(value.status);
+}
+
+function terminalResultFromTaskEntity(value: unknown): unknown {
+    if (!isTaskEntityLike(value)) {
+        return value;
+    }
+    if (value.status?.state !== 'completed') {
+        return undefined;
+    }
+    return value.status.metadata?.result;
+}
+
+function normalizeCacheableA2AResult(value: unknown): { cacheable: boolean; result?: unknown } {
+    if (!isTaskEntityLike(value)) {
+        return { cacheable: true, result: value };
+    }
+    const terminalResult = terminalResultFromTaskEntity(value);
+    return terminalResult === undefined
+        ? { cacheable: false }
+        : { cacheable: true, result: terminalResult };
+}
+
+type A2ATargetExecution = {
+    result: unknown;
+    origin: 'cache' | 'live';
+};
 
 function getRequiredEngine(): TaskEngine {
     const engine = EngineLocator.getEngine<TaskEngine>();
@@ -91,6 +135,37 @@ export class A2AService implements IA2AService {
             }
         } catch (error) {
             a2aLogger.error('A2A cache service initialization failed, continuing without caching', error);
+        }
+    }
+
+    private async recordArtifactResolutionFailure(params: {
+        tenantId: string;
+        taskId: string;
+        targetAgent: string;
+        eventType: string;
+        error: unknown;
+    }): Promise<void> {
+        try {
+            const engine = EngineLocator.getEngine<TaskEngine>();
+            await engine?.appendOperatorEvent({
+                tenantId: params.tenantId,
+                sessionId: params.taskId,
+                type: 'payload.budget_exceeded',
+                payload: {
+                    taskId: params.taskId,
+                    agentId: params.targetAgent,
+                    code: 'ARTIFACT_RESOLUTION_FAILED',
+                    message: params.error instanceof Error ? params.error.message : String(params.error),
+                    limitBytes: 0,
+                    eventType: params.eventType,
+                },
+            });
+        } catch (recordError) {
+            a2aLogger.warn('Failed to record artifact resolution failure', {
+                taskId: params.taskId,
+                targetAgent: params.targetAgent,
+                error: recordError instanceof Error ? recordError.message : String(recordError),
+            });
         }
     }
 
@@ -241,9 +316,18 @@ export class A2AService implements IA2AService {
                 if (attach) await attach(targetCtx, targetCtx.tenantId, targetCtx.task.id, targetPlugin.resolved.agentCard.name);
             } catch { }
 
-            let result;
+            const execOptions = {
+                ...options,
+                parentTelemetryNodeId:
+                    options.parentTelemetryNodeId ?? sourceCtx.telemetry?.nodeId,
+            };
+
+            let result: unknown;
+            let executionOrigin: A2ATargetExecution['origin'];
             try {
-                result = await this.executeTargetAgent(targetPlugin, targetCtx, operationId, options);
+                const execution = await this.executeTargetAgent(targetPlugin, targetCtx, operationId, execOptions);
+                result = execution.result;
+                executionOrigin = execution.origin;
             } finally {
                 // Unregister when complete (even if error)
                 this.callChainTracker.unregisterCall(targetCtx.task.id);
@@ -307,7 +391,19 @@ export class A2AService implements IA2AService {
                 awaitCompletion: (options as any).awaitCompletion,
                 skipParentNotification: skipNotification
             });
-            if (options.parentTenantId && options.parentTaskId && options.parentChildToken && !skipNotification) {
+            const taskState = isTaskEntityLike(result) ? result.status?.state : undefined;
+            const childIsTerminal =
+                taskState === undefined ||
+                taskState === 'completed' ||
+                taskState === 'failed' ||
+                taskState === 'canceled';
+            if (
+                childIsTerminal &&
+                options.parentTenantId &&
+                options.parentTaskId &&
+                options.parentChildToken &&
+                !skipNotification
+            ) {
                 const deliverCompletion = async () => {
                     await eng.handleChildCompleted({
                         tenantId: options.parentTenantId!,
@@ -330,53 +426,14 @@ export class A2AService implements IA2AService {
                     shouldStage: awaitCompletionValue === false
                 });
                 if (awaitCompletionValue === false) {
-                    // ✅ FIX: Check if active loop already handles this via ApiBinder sync injection
-                    // If so, we MUST NOT trigger handleChildCompleted, as it would restart the task (Phantom Restart)
-                    const hasActiveLoopInbox = !!(sourceCtx as any)?.__activeLoopInbox;
-
-                    if (hasActiveLoopInbox) {
-                        a2aLogger.info('Skipping child completion notification - active loop handles via inbox injection', {
-                            parentTaskId: options.parentTaskId,
-                            childToken: options.parentChildToken
-                        });
-                        // Do nothing - ApiBinder logic took care of it
-                    } else {
-                        // Original behavior: Stage synchronously + defer notification
-                        // ✅ FIX: Stage observation synchronously BEFORE deferring resume
-                        // This ensures the observation is available when the parent resumes, even for synchronous completions
-                        a2aLogger.debug('Staging child completion observation synchronously', {
-                            parentTaskId: options.parentTaskId,
-                            childToken: options.parentChildToken
-                        });
-                        try {
-                            await eng.stageChildCompletionObservation({
-                                tenantId: options.parentTenantId!,
-                                parentTaskId: options.parentTaskId!,
-                                childToken: options.parentChildToken!,
-                                result,
-                                childAgentId: targetPlugin.resolved.agentCard.name
-                            });
-                            a2aLogger.debug('Successfully staged child completion observation', {
-                                parentTaskId: options.parentTaskId,
-                                childToken: options.parentChildToken
-                            });
-                        } catch (stageError) {
-                            a2aLogger.warn('Failed to stage child completion observation synchronously', {
-                                error: stageError instanceof Error ? stageError.message : String(stageError),
-                                parentTaskId: options.parentTaskId
-                            });
-                        }
-
-                        // Defer the resume to next turn to ensure observation is available
-                        queueMicrotask(() => {
-                            const notifyPromise = deliverCompletion().catch(notifyError => {
-                                a2aLogger.error('Failed to notify parent on child completion (deferred)', notifyError as any, {
-                                    parentTaskId: options.parentTaskId
-                                });
-                            });
-                            this.trackNotification(notifyPromise);
-                        });
-                    }
+                    // Runtime-owned asynchronous children publish their terminal state
+                    // through onTaskTerminal (or Hatchet task-state recovery). Publishing
+                    // from the dispatch call as well creates a second producer and is no
+                    // longer part of the correctness path.
+                    a2aLogger.debug('Skipping dispatch-path parent notification for runtime-owned child', {
+                        parentTaskId: options.parentTaskId,
+                        childToken: options.parentChildToken,
+                    });
                 } else {
                     try {
                         await deliverCompletion();
@@ -388,9 +445,10 @@ export class A2AService implements IA2AService {
                 }
             }
 
-            // Flush child snapshot (vars + llm) after turn (avoid duplicate if already saved during requestInput turn)
+            // A cache hit executes no child turn, so there is no turn-owned state to flush
+            // and no child coordinator against which a flush could be fenced.
             try {
-                if (!(targetCtx as any).__wmSavedThisTurn) {
+                if (executionOrigin === 'live' && !(targetCtx as any).__wmSavedThisTurn) {
                     await (eng as any).flushContextSnapshot?.(targetCtx.tenantId, targetCtx.task.id, targetPlugin.resolved.agentCard.name, targetCtx as any);
                 }
             } catch { }
@@ -406,6 +464,84 @@ export class A2AService implements IA2AService {
             });
             throw error;
         }
+    }
+
+    /**
+     * Build a TaskContext for a thread-bound session (no parent A2A call, no child task id randomization).
+     * Used by conversation recipient activation: task id equals routing session id `${threadId}:${agentId}`.
+     */
+    async buildPassiveConversationContext(params: {
+        plugin: AgentPlugin;
+        tenantId: string;
+        sessionId: string;
+    }): Promise<FullTaskContext> {
+        const { plugin, tenantId, sessionId } = params;
+        const targetAgentId = plugin.resolved.agentCard.name;
+        const minimalSource: MinimalSourceTaskContext = {
+            tenantId,
+            agentId: targetAgentId,
+            task: { id: sessionId, input: { __conversationSession: true } },
+        };
+        const targetSpecificOverrides = {
+            tenantId,
+            agentId: targetAgentId,
+            task: {
+                id: sessionId,
+                input: { __conversationSession: true },
+            },
+            reply: this.createTargetReply(plugin, undefined),
+            progress: this.createTargetProgress(plugin),
+            complete: this.createTargetComplete(plugin),
+            fail: this.createTargetFail(plugin),
+            logger: this.createTargetLogger(plugin),
+            throw: this.createTargetThrow(plugin),
+            recordUsage: this.createTargetRecordUsage(plugin),
+            __activeLoopInbox: undefined,
+            __activeLoopEnv: undefined,
+            __env: undefined,
+            __autoExecuteTool: undefined,
+            currentTurnNodeId: undefined,
+            telemetry: { nodeId: undefined },
+        };
+        const mergedContext = { ...minimalSource, ...targetSpecificOverrides } as unknown as FullTaskContext;
+
+        const targetCtx = (await extendContextWithMemory(
+            mergedContext,
+            tenantId,
+            targetAgentId,
+            plugin.resolved.runtimeManifest,
+            undefined,
+            await (await import('@a2arium/callagent-memory-engine')).getMemoryPrismaClient()
+        )) as unknown as FullTaskContext;
+
+        if (!(targetCtx as Record<string, unknown>).__mental && !(targetCtx as Record<string, unknown>).M) {
+            const { initialM } = await import('../loop/init.js');
+            (targetCtx as Record<string, unknown>).__mental = initialM(targetCtx);
+        }
+
+        if (plugin.resolved.runtimeManifest.config) {
+            if (!targetCtx.config || typeof targetCtx.config !== 'object') {
+                (targetCtx as Record<string, unknown>).config = {};
+            }
+            (targetCtx.config as Record<string, unknown>).runtimeManifestConfig = plugin.resolved.runtimeManifest.config;
+            (targetCtx as Record<string, unknown>).__runtimeManifestConfig = plugin.resolved.runtimeManifest.config;
+        }
+
+        if (!plugin.llmAdapter && plugin.llmConfig) {
+            targetCtx.llm = createLLMForTask(plugin.llmConfig, targetCtx);
+        } else if (plugin.llmAdapter) {
+            targetCtx.llm = plugin.llmAdapter;
+        }
+
+        targetCtx.sendTaskToAgent = (async (
+            nestedTargetAgent: string,
+            nestedTaskInput: import('../shared/types/index.js').TaskInput,
+            nestedOptions?: unknown
+        ) => {
+            return this.sendTaskToAgent(targetCtx as FullTaskContext, nestedTargetAgent, nestedTaskInput, nestedOptions as A2ACallOptions);
+        }) as FullTaskContext['sendTaskToAgent'];
+
+        return targetCtx;
     }
 
     /**
@@ -467,7 +603,11 @@ export class A2AService implements IA2AService {
             },
 
             // Override I/O methods to add target-agent prefixing and logging
-            reply: this.createTargetReply(targetPlugin, (options as any).parentTenantId && (options as any).parentTaskId ? { tenantId: (options as any).parentTenantId, parentTaskId: (options as any).parentTaskId } : undefined),
+            reply: this.createTargetReply(targetPlugin, (options as any).parentTenantId && (options as any).parentTaskId ? {
+                tenantId: (options as any).parentTenantId,
+                parentTaskId: (options as any).parentTaskId,
+                parentChildToken: (options as any).parentChildToken,
+            } : undefined),
             progress: this.createTargetProgress(targetPlugin),
             complete: this.createTargetComplete(targetPlugin),
             fail: this.createTargetFail(targetPlugin),
@@ -481,9 +621,13 @@ export class A2AService implements IA2AService {
             // Override recordUsage for target-specific tracking
             recordUsage: this.createTargetRecordUsage(targetPlugin),
 
-            // ✅ FIX: Do not inherit parent loop state
+            // ✅ FIX: Do not inherit parent loop state or telemetry context
             __activeLoopInbox: undefined,
-            __activeLoopEnv: undefined
+            __activeLoopEnv: undefined,
+            __env: undefined,
+            __autoExecuteTool: undefined,
+            currentTurnNodeId: undefined,
+            telemetry: { nodeId: undefined },
         };
 
         // Merge base context with target-specific overrides
@@ -593,7 +737,7 @@ export class A2AService implements IA2AService {
                     try { await (eng as any).flushContextSnapshot?.(targetCtx.tenantId, targetCtx.task.id, targetPlugin.resolved.agentCard.name, targetCtx as any); } catch { }
 
                     // Create a real pending input entry in the child's session so resumeInput can work
-                    const childToken = uuidv4();
+                    const childToken = uuidv7();
                     const snap = await (eng as any).sessionManager?.load(targetCtx.tenantId, targetCtx.task.id);
                     const base = (snap?.snapshot as Record<string, unknown>) || {};
                     const inputs = getPendingInputs(base);
@@ -647,7 +791,7 @@ export class A2AService implements IA2AService {
     /**
      * Create target-specific reply function
      */
-    private createTargetReply(targetPlugin: AgentPlugin, parent?: { tenantId: string; parentTaskId: string }) {
+    private createTargetReply(targetPlugin: AgentPlugin, parent?: { tenantId: string; parentTaskId: string; parentChildToken?: string }) {
         return async (parts: any) => {
             const prefix = `[${targetPlugin.resolved.agentCard.name}]`;
 
@@ -679,12 +823,61 @@ export class A2AService implements IA2AService {
                             ? parts.map(p => (typeof p === 'string' ? `${prefix} ${p}` : p?.text ? `${prefix} ${p.text}` : '')).filter(Boolean).join('\n')
                             : parts?.text ? `${prefix} ${parts.text}` : '';
                     if (text) {
-                        eventBus.publish(taskChannel(parent.parentTaskId), {
-                            artifact: {
-                                name: 'response', index: 0, append: false, lastChunk: false,
-                                parts: [{ type: 'text', text }]
-                            }
-                        } as any);
+                        const engine = getRequiredEngine();
+                        const now = new Date().toISOString();
+                        const debugParts: RuntimeStreamMessagePart[] = [{ type: 'text', text }];
+                        const childMessage = RuntimeStreamEventSchema.parse({
+                            version: RUNTIME_STREAM_EVENT_VERSION,
+                            id: uuidv7(),
+                            seq: Date.now(),
+                            taskId: parent.parentTaskId,
+                            tenantId: parent.tenantId,
+                            ts: now,
+                            type: 'child.message',
+                            visibility: 'debug',
+                            channel: 'debug',
+                            data: {
+                                ...(parent.parentChildToken ? { token: parent.parentChildToken } : {}),
+                                agentId: targetPlugin.resolved.agentCard.name,
+                                parts: debugParts,
+                            },
+                        });
+                        void engine.eventBus.publish(
+                            createBusEvent({
+                                channel: taskChannel(parent.parentTaskId),
+                                partitionKey: parent.parentTaskId,
+                                cloud: {
+                                    id: childMessage.id,
+                                    type: childMessage.type,
+                                    source: `/tasks/${parent.parentTaskId}`,
+                                    time: childMessage.ts,
+                                    datacontenttype: 'application/json',
+                                    data: childMessage,
+                                },
+                            })
+                        );
+                        void engine.eventBus.publish(
+                            createBusEvent({
+                                channel: taskChannel(parent.parentTaskId),
+                                partitionKey: parent.parentTaskId,
+                                cloud: {
+                                    id: uuidv7(),
+                                    type: 'task.a2a',
+                                    source: `/tasks/${parent.parentTaskId}`,
+                                    time: new Date().toISOString(),
+                                    datacontenttype: 'application/json',
+                                    data: {
+                                        artifact: {
+                                            name: 'response',
+                                            index: 0,
+                                            append: false,
+                                            lastChunk: false,
+                                            parts: [{ type: 'text', text }],
+                                        },
+                                    },
+                                },
+                            })
+                        );
                     }
                 } catch { /* noop */ }
             }
@@ -810,7 +1003,7 @@ export class A2AService implements IA2AService {
         targetCtx: FullTaskContext,
         operationId: string,
         options: A2ACallOptions
-    ): Promise<unknown> {
+    ): Promise<A2ATargetExecution> {
         return withLoggingContext(
             {
                 agentId: targetPlugin.resolved.agentCard.name,
@@ -823,8 +1016,39 @@ export class A2AService implements IA2AService {
                 turn: undefined
             },
             async () => {
+                let agentNode: AgentNode | undefined;
+                let hasLoopModules = false;
                 try {
                     const effectiveCache = this.resolveEffectiveCacheConfig(targetPlugin, options);
+
+                    // Telemetry: Create an AgentNode upfront so both cache hits and cache misses produce a stable span
+                    try {
+                        const parentNodeId = (options as { parentTelemetryNodeId?: string }).parentTelemetryNodeId;
+                        const parentNode = parentNodeId ? telemetry.getNode(parentNodeId) : undefined;
+                        const traceId = parentNode?.traceId || targetCtx.telemetry?.traceId || uuidv7();
+                        const nodeId = uuidv7();
+                        agentNode = new AgentNode(targetPlugin.resolved.agentCard.name, nodeId, parentNodeId, traceId);
+                        
+                        agentNode.start({
+                            ...targetCtx.task.input,
+                            _cached: effectiveCache.enabled ? 'pending' : 'disabled'
+                        });
+                        telemetry.registerNode(agentNode);
+
+                        Object.assign(agentNode.providerData, {
+                            sessionId: targetCtx.task.id,
+                            tenantId: targetCtx.tenantId,
+                            parentSessionId: (options as { parentTaskId?: string }).parentTaskId,
+                            threadId: traceId,
+                        });
+                        
+                        // Inject telemetry node into targetCtx so TaskEngine avoids recreating it IF it runs
+                        if (!targetCtx.telemetry) targetCtx.telemetry = {};
+                        targetCtx.telemetry.nodeId = agentNode.id;
+                        targetCtx.telemetry.traceId = agentNode.traceId;
+                    } catch (tErr) {
+                        a2aLogger.warn('A2AService failed to start agent telemetry node', { error: tErr });
+                    }
 
                     // Check cache if enabled (manifest or override)
                     if (this.agentResultCache && effectiveCache.enabled) {
@@ -834,8 +1058,10 @@ export class A2AService implements IA2AService {
                             effectiveCache.excludePaths,
                             targetCtx.tenantId
                         );
+                        const normalizedCached = normalizeCacheableA2AResult(cachedResult);
 
-                        if (cachedResult) {
+                        if (cachedResult && normalizedCached.cacheable) {
+                            const servedCachedResult = normalizedCached.result;
                             a2aLogger.debug('A2A cache hit', {
                                 operationId,
                                 targetAgent: targetPlugin.resolved.agentCard.name,
@@ -847,7 +1073,7 @@ export class A2AService implements IA2AService {
                             // Hydrate artifacts in cached result before returning
                             try {
                                 ArtifactHydrationService.attachHydratedArtifactHandles(
-                                    cachedResult,
+                                    servedCachedResult,
                                     this.agentResultCache,
                                     targetCtx.tenantId
                                 );
@@ -856,10 +1082,38 @@ export class A2AService implements IA2AService {
                                     operationId,
                                     targetAgent: targetPlugin.resolved.agentCard.name
                                 });
+                                await this.recordArtifactResolutionFailure({
+                                    tenantId: targetCtx.tenantId,
+                                    taskId: targetCtx.task.id,
+                                    targetAgent: targetPlugin.resolved.agentCard.name,
+                                    eventType: 'a2a.cached_result.hydrate',
+                                    error: hydrationError,
+                                });
                                 // Continue even if hydration fails, returning the raw result
                             }
 
-                            return cachedResult;
+                            if (agentNode) {
+                                agentNode.end({
+                                    status: 'completed',
+                                    _origin: 'cache',
+                                    result: servedCachedResult
+                                });
+                                telemetry.endNode(agentNode);
+                            }
+
+                            attachA2aResultTelemetry(servedCachedResult, {
+                                childTraceId: targetCtx.telemetry?.traceId,
+                                childAgentNodeId: agentNode?.id,
+                                executionOrigin: 'cache',
+                            });
+                            return { result: servedCachedResult, origin: 'cache' };
+                        } else if (cachedResult) {
+                            a2aLogger.warn('Ignoring non-terminal A2A cache entry', {
+                                operationId,
+                                targetAgent: targetPlugin.resolved.agentCard.name,
+                                taskId: targetCtx.task.id,
+                                cachedState: isTaskEntityLike(cachedResult) ? cachedResult.status?.state : undefined,
+                            });
                         }
                     }
 
@@ -872,15 +1126,16 @@ export class A2AService implements IA2AService {
                         taskId: targetCtx.task.id
                     });
 
-                    const hasLoopModules = !!(targetPlugin as any)?.loop?.modules && Object.keys((targetPlugin as any).loop.modules || {}).length > 0;
+                    hasLoopModules = !!(targetPlugin as any)?.loop?.modules && Object.keys((targetPlugin as any).loop.modules || {}).length > 0;
                     const result = hasLoopModules
                         ? await (async () => {
                             // Always route loop-first agents through the engine so A2A overrides are respected
                             const eng = getRequiredEngine();
                             try { await (eng as any).attachWorkingMemory?.(targetCtx as any, targetCtx.tenantId, targetCtx.task.id, targetPlugin.resolved.agentCard.name); } catch { }
                             const entity = { id: targetCtx.task.id, input: targetCtx.task.input };
-                            const parentNodeId = (options as { parentTelemetryNodeId?: string }).parentTelemetryNodeId;
-                            const started = await eng.startTask({ task: entity, isStreaming: false, agentId: targetPlugin.resolved.agentCard.name, tenantId: targetCtx.tenantId, initialContext: targetCtx, parentTelemetryNodeId: parentNodeId });
+                            
+                            // TaskEngine creates its own trace if parentNodeId is missing. We established one above natively in A2AService, so we pass it.
+                            const started = await eng.startTask({ task: entity, isStreaming: false, agentId: targetPlugin.resolved.agentCard.name, tenantId: targetCtx.tenantId, initialContext: targetCtx, parentTelemetryNodeId: agentNode?.id, skipTelemetryNodeCreation: !!agentNode });
                             return started ?? { status: 'started' };
                         })()
                         : (targetPlugin.handleTask
@@ -890,22 +1145,31 @@ export class A2AService implements IA2AService {
                                 const eng = getRequiredEngine();
                                 try { await (eng as any).attachWorkingMemory?.(targetCtx as any, targetCtx.tenantId, targetCtx.task.id, targetPlugin.resolved.agentCard.name); } catch { }
                                 const entity = { id: targetCtx.task.id, input: targetCtx.task.input };
-                                const parentNodeId = (options as { parentTelemetryNodeId?: string }).parentTelemetryNodeId;
-                                const started = await eng.startTask({ task: entity, isStreaming: false, agentId: targetPlugin.resolved.agentCard.name, tenantId: targetCtx.tenantId, initialContext: targetCtx, parentTelemetryNodeId: parentNodeId });
+                                const started = await eng.startTask({ task: entity, isStreaming: false, agentId: targetPlugin.resolved.agentCard.name, tenantId: targetCtx.tenantId, initialContext: targetCtx, parentTelemetryNodeId: agentNode?.id, skipTelemetryNodeCreation: !!agentNode });
                                 return started ?? { status: 'started' };
                             })());
 
                     // Cache the result if caching is enabled
                     if (this.agentResultCache && effectiveCache.enabled) {
                         try {
-                            await this.agentResultCache.setCachedResult(
-                                targetPlugin.resolved.agentCard.name,
-                                targetCtx.task.input,
-                                result,
-                                effectiveCache.ttlSeconds,
-                                effectiveCache.excludePaths,
-                                targetCtx.tenantId
-                            );
+                            const normalizedResult = normalizeCacheableA2AResult(result);
+                            if (!normalizedResult.cacheable) {
+                                a2aLogger.debug('Skipping non-terminal A2A result cache write', {
+                                    operationId,
+                                    targetAgent: targetPlugin.resolved.agentCard.name,
+                                    taskId: targetCtx.task.id,
+                                    state: isTaskEntityLike(result) ? result.status?.state : undefined,
+                                });
+                            } else {
+                                await this.agentResultCache.setCachedResult(
+                                    targetPlugin.resolved.agentCard.name,
+                                    targetCtx.task.input,
+                                    normalizedResult.result,
+                                    effectiveCache.ttlSeconds,
+                                    effectiveCache.excludePaths,
+                                    targetCtx.tenantId
+                                );
+                            }
                         } catch (cacheError) {
                             a2aLogger.error('Failed to cache A2A result', cacheError, {
                                 operationId,
@@ -929,6 +1193,13 @@ export class A2AService implements IA2AService {
                                 operationId,
                                 targetAgent: targetPlugin.resolved.agentCard.name
                             });
+                            await this.recordArtifactResolutionFailure({
+                                tenantId: targetCtx.tenantId,
+                                taskId: targetCtx.task.id,
+                                targetAgent: targetPlugin.resolved.agentCard.name,
+                                eventType: 'a2a.live_result.hydrate',
+                                error: hydrationError,
+                            });
                         }
                     }
 
@@ -940,12 +1211,29 @@ export class A2AService implements IA2AService {
                         hasResult: !!result
                     });
 
-                    return result;
+                    // We already hooked TaskEngine to end the node if it was a startTask invocation. 
+                    // However, for pure fallback JS handleTask plugins, we might need to close it here.
+                    if (agentNode && !hasLoopModules && targetPlugin.handleTask) {
+                         agentNode.end({ status: 'completed', result });
+                         telemetry.endNode(agentNode);
+                    }
+
+                    attachA2aResultTelemetry(result, {
+                        childTraceId: targetCtx.telemetry?.traceId,
+                        childAgentNodeId: agentNode?.id,
+                    });
+                    return { result, origin: 'live' };
                 } catch (error) {
                     a2aLogger.error('Target agent execution failed', error, {
                         operationId,
                         targetAgent: targetPlugin.resolved.agentCard.name
                     });
+                    if (agentNode && agentNode.endTime == null) {
+                        const err = error instanceof Error ? error : new Error(String(error));
+                        agentNode.fail(err);
+                        telemetry.failNode(agentNode, err);
+                        telemetry.endNode(agentNode);
+                    }
                     throw error;
                 }
             }

@@ -1,5 +1,8 @@
 # Agent Runner
 
+> Status: design draft.
+> API shapes here may evolve; verify stable contracts in `apps/docs/0-aplret_contracts.md`.
+
 The Agent Runner is a versatile CLI tool that supports both streaming and non-streaming modes for agent execution. It allows agents to provide real-time updates and partial results as they become available, or to operate in traditional buffered mode.
 
 ## Features
@@ -27,17 +30,17 @@ yarn run-agent <path-to-agent-module> [json-input] [options]
 For example:
 
 ```bash
-# Run the hello agent with streaming enabled
-yarn run-agent apps/examples/hello-agent/AgentModule.ts '{"name":"World"}' --stream
+# Run the hello agent with streaming enabled (compiled JS path)
+yarn run-agent apps/examples/hello-agent/dist/AgentModule.js '{"name":"World"}' --stream
 
 # Run the LLM agent with JSON output format
-yarn run-agent apps/examples/llm-agent/AgentModule.ts '{"query":"Tell me a joke"}' --stream --format=json
+yarn run-agent apps/examples/llm-agent/dist/AgentModule.js '{"query":"Tell me a joke"}' --stream --format=json
 
 # Run the streaming demo agent with SSE output format
-yarn run-agent apps/examples/streaming-agent/AgentModule.ts '{"query":"What is AI?"}' --stream --format=sse
+yarn run-agent apps/examples/streaming-agent/dist/AgentModule.js '{"query":"What is AI?"}' --stream --format=sse
 
 # Write output to a file
-yarn run-agent apps/examples/streaming-agent/AgentModule.ts '{"query":"Tell me a story"}' --stream --output=output.txt
+yarn run-agent apps/examples/streaming-agent/dist/AgentModule.js '{"query":"Tell me a story"}' --stream --output=output.txt
 ```
 
 ### Options
@@ -45,20 +48,28 @@ yarn run-agent apps/examples/streaming-agent/AgentModule.ts '{"query":"Tell me a
 - `--stream`: Enable streaming mode (default: false)
 - `--format=<format>`: Output format, one of 'console', 'json', or 'sse' (default: 'console')
 - `--output=<file>`: Write output to the specified file as well as stdout
+- `--max-turns=<n>`: Override loop turn budget with a positive integer
+
+### Runtime note
+
+- `yarn run-agent` uses compiled JS (`node .../dist/runnerCli.js`)
+- For TypeScript source modules, use `yarn dev` or a Node TS loader (`tsx` / `--loader ts-node/esm`)
+
+### Conversation visibility note
+
+- In non-streaming mode, `runnerCli` reports root-task completion and exits; it does not wait indefinitely for every conversation/topic seat session.
+- Use `--stream` when you need live `ctx.reply(...)` output while topic fanout turns are being activated.
+- For durable end-state checks, prefer conversation projections/transcripts or message-log-backed assertions over console output alone.
+- For multi-seat topics, attribute speakers by `topic.message.received.payload.message.senderMemberId` (not only `senderAgentId`).
 
 ### Predefined Scripts
 
-For convenience, several predefined scripts are available in the root `package.json`:
+Script names vary per repository. Check your root `package.json` and run the commands that actually exist there.
 
 ```bash
-# Run the demo agent with console output
-yarn run-agent-demo
-
-# Run the demo agent with JSON output
-yarn run-agent-demo-json
-
-# Run the demo agent with SSE output
-yarn run-agent-demo-sse
+# Example root scripts used in this repo
+yarn run-agent "apps/examples/hello-agent/dist/AgentModule.js" '{"name":"World"}'
+yarn dev "apps/examples/loop-agent-mini/AgentModule.ts" '{}'
 ```
 
 ## Auto-Resume Behavior

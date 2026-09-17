@@ -28,6 +28,7 @@ Use **`TurnTraceCollector`** when you run the loop in-process and need to assert
 - Pass **`collectTraces: true`** (and optionally **`manifestProvenance`**) to **`runLoop(ctx, M, env, modules, opts)`**.
 - **`runLoop`** returns **`result.traces`** (array of **TurnTrace**) when **`collectTraces`** is true; each element is the trace for one turn.
 - Alternatively, attach a **`TurnTraceCollector`** to **`ctx.__turnTraceCollector`** before running; the loop will push each turn’s trace there and you can call **`collector.getByTurn(n)`**, **`collector.getLast()`**, or **`collector.getAll()`**.
+- Note on API boundaries: collector/indexed access (`result.traces[n]`, `collector.getByTurn(n)`) is separate from harness assertion helpers. In harness tests, use `expectTurn(index, fn)` for indexed assertions or `expectTurn(fn)` for latest-trace assertions.
 
 See **How-to: Test APLRET agents** for harness examples using **`collectTraces: true`** and **`result.traces`**.
 
@@ -35,11 +36,17 @@ See **How-to: Test APLRET agents** for harness examples using **`collectTraces: 
 
 Each **TurnTrace** can include compact summaries of sub-calls made during that turn:
 
-- **`trace.llmCalls`** — array of **LLMCallTrace** (model, provider, durationMs, input/output tokens, cost, optional module).
+- **`trace.llmCalls`** — array of **LLMCallTrace** (model, provider, durationMs, input/output tokens, cost, optional module, plus optional output-contract metadata: `hasOutputContract`, `outputContractName`, `outputContractStatus`).
 - **`trace.toolCalls`** — array of **ToolCallTrace** (tool name, durationMs, status, optional module).
-- **`trace.childCalls`** — array of **ChildCallTrace** (token, agentId, childTaskId, awaitCompletion, durationMs, status, parentTurnId, childAgentNodeId, childTraceId, resultSummary, error). Use these to see which child tasks were dispatched or completed in this turn and how they link to the parent turn or child trace.
+- **`trace.childCalls`** — array of **ChildCallTrace** (token, agentId, childTaskId, awaitCompletion, durationMs, status, parentTurnId, **`childAgentNodeId`**, **`childTraceId`**, resultSummary, error). Phase 3 onward, **`childTraceId`** / **`childAgentNodeId`** are **reliably present on successful dispatch** when telemetry is available; on failure they are **absent** (not `null`) — test with `typeof x === 'string'`. **Walking parent → child:** use **`trace.childCalls[n].childTraceId`** to correlate with the child agent’s **`TurnTrace`** / telemetry (**`collectTraces`** on the child run or your trace backend).
 
-Console output (when using the built-in ConsoleProvider) prints a compact summary per turn; for full field-level inspection use **`result.traces`** in tests or export traces to your observability backend.
+Console output (when using the built-in ConsoleProvider) prints a compact summary per turn; for full field-level inspection use **`result.traces`** in tests or the operator run graph.
+
+For cross-agent topology, start from the operator run graph (`GET /tasks/:taskId/run-graph`; see [Operator Run Graph](./operator-run-graph.md)). It shows root/child `AgentRun` nodes and `AgentRunEdge` links first, then points each turn back to TurnTrace via `traceId` / `spanId` / `turnTraceRef`. TurnTrace remains the turn-level source of truth; the run graph is the higher-level navigation surface.
+
+### Payload size
+
+TurnTrace and operator events are compact operational telemetry, not a raw payload archive. Large values should be represented by artifact metadata, trace/span references, hashes, summaries, or truncated previews. Use the artifact store or the application-level LLM tooling for full prompt/response/body inspection when that level of detail is required.
 
 ## First rule
 
@@ -52,6 +59,20 @@ Chat output is usually:
 - nondeterministic (LLM variation)
 
 Debug from TurnTrace and the turn pipeline.
+
+## Fault localization by repository layout
+
+TurnTrace shows *what happened*; your **folder layout** shows *where to fix it*. Standard mapping:
+
+| Symptom class | Start here |
+|---------------|------------|
+| Raw payload / schema / wrapper mismatch | `normalizers/` |
+| Wrong remembered fact or summary | `reducers.ts`, Learning |
+| Wrong next intent | `selectors.ts`, `policy.ts` |
+| Tool/LLM/child misbehavior | `effects/` |
+| Wrong await, resume, or terminal outcome | `transition.ts`, and **`flow.md`** for intended procedure |
+
+Then use **`types.ts`** for vocabulary truth and [How-to: Agent repository layout](./14-agent_repository_layout_for_aplret.md) for the full map.
 
 ## Fast triage
 
@@ -71,6 +92,9 @@ Primary fields:
 - `perception`
 - `mentalStateBeforeHash`, `mentalStateAfterHash`
 - `intent`
+- `extensions` (optional compact telemetry; not cognition)
+
+Do not expect retrieved memory payloads in `inboxCurrent`. Durable reads are not observations; operator `memory.read` records keys/counts. Attach a namespace with `recordTurnTraceExtension` (put sidecar artifact ids in `data`; do not dump RAG chunks). `inboxCurrent` may show `plan.patch` or `validation.failed`. Forked harnesses have their own `allTraces()`.
 
 ### B) Wrong control flow
 
@@ -108,7 +132,7 @@ Primary fields:
 Symptoms:
 
 - expected result never influenced memory
-- observation silently dropped
+- observation silently dropped (invalid **plan** payloads are **not** dropped: they become `internal/validation.failed` in `inboxCurrent`)
 - source/kind mismatch
 
 Primary fields:
@@ -116,6 +140,7 @@ Primary fields:
 - `inboxCurrent`
 - `perception`
 - invariant errors (if present — inspect via `instanceof InvariantError` and `e.invariant.detail.type` narrowing, or `instanceof ModuleExecutionError` for module failures). Invalid observation envelopes are injected as `source: 'internal', kind: 'validation.failed'` into the inbox rather than thrown.
+- canonical envelope and validation reference: `./16-observation_envelope_and_validation.md`
 
 ### E) Configuration drift
 
@@ -151,7 +176,7 @@ The first wrong turn is usually the real bug.
 
 ### Step 2: Verify the inbox actually contained the expected event
 
-Look at `trace.inboxCurrent`.
+Start with `trace.inboxCurrent` for a fast check.
 
 Ask:
 
@@ -159,7 +184,8 @@ Ask:
 - Is `source` correct?
 - Is `kind` correct?
 - Does it have the expected token?
-- Is payload shape compatible?
+
+Then verify payload shape on the raw observation envelope (`env.inbox.current` in your harness run or session snapshot). `trace.inboxCurrent` is a compact summary view (source/kind/token), not the full payload object.
 
 If the event is missing: the bug is upstream of Perception (Transition/runtime injection/tool/child delivery).
 
@@ -229,6 +255,23 @@ Ask:
 
 If the effect happened but control flow is wrong: fix Transition/control plumbing.
 
+### “Why is this completed with attention?”
+
+This means the durable lifecycle and the agent's domain result disagree. Inspect
+`trace.execResult` and `trace.transition` together:
+
+- `result.ok === false` plus `transition.kind === 'complete'` means the agent
+  converted a logical failure into a completed task. Fix `transition.ts` to
+  return `fail` with the structured error.
+- `result.ok === false` plus `transition.kind === 'fail'` is correct: inspect
+  the error code/message to fix the underlying effect or configuration.
+- A valid negative business outcome should be represented as a successful,
+  named outcome (for example `ok: true, outcome: 'not_found'`), not `ok: false`.
+
+Operator intentionally shows the first case as attention rather than silently
+calling it healthy. The durable terminal status remains the transition result.
+See [APLRET contracts](./0-aplret_contracts.md#task-lifecycle-outcome-versus-domain-outcome).
+
 ## Playbooks for common questions
 
 ### “Why did we await?”
@@ -238,6 +281,7 @@ Look for the first turn where `transition.kind` is `await_input`, `await_tool`, 
 Checklist:
 
 - What intent caused the await?
+- Does `manifestConsent.reason` equal `manifest_consent_required`? If so, inspect only its identifier, token presence, and receipt status. Digests, effect keys, and payloads are intentionally absent.
 - Does `execAction` include a token?
 - Does `transition.token` match that token?
 - Does `pendingAfter` record the token under the expected category?
@@ -323,3 +367,38 @@ When an AI proposes a fix, require it to answer:
 - What changed in the turn story after the fix?
 - Which tests were added or updated (and what TurnTrace assertions do they make)?
 
+## Conversation trace fields 
+
+When diagnosing thread-native conversation behavior, inspect:
+
+- `trace.conversation`
+- `trace.incomingMessages`
+- `trace.outgoingMessages`
+- `trace.messageSequenceNumber`
+- `trace.dedupeHit`
+- `trace.deliveryLagMs` (if populated)
+
+Interpretation:
+
+- missing `conversation` on an expected turn usually means no conversation observation was consumed/emitted that turn
+- `dedupeHit: true` indicates idempotent replay path
+- `messageSequenceNumber` should advance only for durably accepted messages
+
+When diagnosing topic behavior, inspect:
+
+- `trace.conversation` (`kind: 'topic'`)
+- `trace.incomingMessages` / `trace.outgoingMessages`
+- `trace.topicSelectorDecision.kind`
+- `trace.topicSelectorDecision.resolvedMembers` (`{ memberId, agentId }[]`)
+- `trace.fanoutSummary` (`accepted/rejected/queued/dedupeHits`)
+- `trace.inviteDelivery` (`issued/received/accepted/declined/expired`)
+- `trace.inviteDelivery.received[].autoJoinAttempted`
+- `trace.inviteDelivery.received[].autoJoinError` (typed conversation error when auto-join fails)
+
+Interpretation:
+
+- `resolvedMembers` shows exactly which seats were targeted by selector resolution
+- if `resolvedMembers` is empty on an expected post turn, inspect selector input vs active membership
+- `fanoutSummary.rejected > 0` with non-empty `resolvedMembers` usually indicates queue/busy failures after selection
+- for multi-seat agents, two rows may share `agentId` but differ by `memberId` (this is expected under Phase 2a)
+- `inviteDelivery.received` without matching `accepted|declined|expired` indicates an invite is still pending in lifecycle state

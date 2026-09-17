@@ -4,7 +4,7 @@
 
 import type { TaskContext } from '../shared/types/index.js';
 import type { MentalState, EnvironmentState, MemoryReader, MemoryWriter } from './types.js';
-import type { Intent, ExecutableAction } from '../types/intent.js';
+import type { Intent } from '../types/intent.js';
 import type {
     Observation,
     ObservationProvenance,
@@ -19,11 +19,23 @@ import type {
     PerceptionTrace,
     IntentTrace,
     ShieldTrace,
+    ManifestConsentTrace,
     InboxObservationSummary,
 } from '../types/turnTrace.js';
 import { summarizeInbox } from '../telemetry/turnTraceHelpers.js';
 import { computeStableHash } from '../telemetry/manifestProvenance.js';
 import { compactModuleOutput } from '../telemetry/turnTraceHelpers.js';
+import type { ExecResult, ExecOutcome } from '../types/execOutcome.js';
+import {
+    DEFAULT_MANIFEST_CONSENT_TTL_MS,
+    MANIFEST_CONSENT_INPUT_SCHEMA,
+    deriveConsentEffectKey,
+    digestIntent,
+    manifestConsentTarget,
+    sanitizedConsentPrompt,
+} from './manifestConsent.js';
+import type { IntentConsentReceipt } from './types.js';
+import { isHatchetWorkerLifetimeLostError } from '@a2arium/callagent-types/hatchet-worker-lifetime-lost';
 
 type MemoryWriterWithApply = MemoryWriter & {
     __applyToMental?: <S>(m: MentalState<S>) => MentalState<S>;
@@ -31,19 +43,14 @@ type MemoryWriterWithApply = MemoryWriter & {
 
 const log = logger.createLogger({ prefix: 'oneTurn' });
 
+function rethrowRuntimeControlFlow(error: unknown): void {
+    if (isHatchetWorkerLifetimeLostError(error)) throw error;
+}
+
 export type AttentionSignal = unknown;
 
 export type { Observation, ObservationProvenance, ExecErrorPayload };
-
-export type ExecResult<Data = unknown, ErrorPayload extends ExecErrorPayload = ExecErrorPayload> = {
-    status: 'ok' | 'error';
-    data?: Data;
-    error?: ErrorPayload;
-    receipts?: unknown;
-    correlationId?: string;
-    toolId?: string;
-    ts?: number;
-};
+export type { ExecResult, ExecOutcome };
 
 export type ShieldOutcome =
     | { action: 'pass'; intent: Intent }
@@ -56,8 +63,9 @@ export type TransitionOut =
     | { kind: 'await_input'; token: string }
     | { kind: 'await_child'; token: string }
     | { kind: 'await_tool'; token: string }
+    | { kind: 'await_event'; token: string }
     | { kind: 'complete'; result?: unknown }
-    | { kind: 'fail'; reason: string };
+    | { kind: 'fail'; reason: string; error?: unknown };
 
 
 // Temporary alias while downstream modules migrate
@@ -87,14 +95,14 @@ export type Modules<
     ) => MentalState<Sensory> | Promise<MentalState<Sensory>>;
     policy: (m: MentalState<Sensory>, mem: MemoryReader) => Intent | Array<{ action: Intent; prob: number }>;
     shield: (m: MentalState<Sensory>, a: Intent, mem: MemoryReader) => ShieldOutcome;
-    execution: (a: Intent, ctx: TaskContext, mem: MemoryReader, m: MentalState<Sensory>) => Promise<{ action: ExecutableAction; result: ExecResult<ExecData, ExecError> }>;
+    execution: (a: Intent, ctx: TaskContext, mem: MemoryReader, m: MentalState<Sensory>) => Promise<ExecOutcome<ExecData, ExecError>>;
     transition: (
         env: EnvironmentState,
-        exec: { action: ExecutableAction; result: ExecResult<ExecData, ExecError> },
+        exec: ExecOutcome<ExecData, ExecError>,
         m: MentalState<Sensory>,
         mem: MemoryReader
     ) => TransitionOut | Promise<TransitionOut>;
-    extrinsicReward?: (m: MentalState<Sensory>, a: Intent, exec: { action: ExecutableAction; result: ExecResult<ExecData, ExecError> }, outcome: TransitionOut) => number;
+    extrinsicReward?: (m: MentalState<Sensory>, a: Intent, exec: ExecOutcome<ExecData, ExecError>, outcome: TransitionOut) => number;
     intrinsicReward?: (m: MentalState<Sensory>, o: Obs, mem: MemoryReader) => number;
 };
 
@@ -116,7 +124,7 @@ export async function oneTurn<
 ): Promise<{
     m: MentalState<Sensory>;
     outcome: TransitionOut;
-    exec: { action: ExecutableAction; result: ExecResult<ExecData, ExecError> };
+    exec: ExecOutcome<ExecData, ExecError>;
     timings: Record<string, number>;
     reward: number;
     stageTrace?: StageTraceEntry;
@@ -124,6 +132,7 @@ export async function oneTurn<
     perception?: PerceptionTrace;
     intent?: IntentTrace;
     shield?: ShieldTrace;
+    manifestConsent?: ManifestConsentTrace;
     inboxSnapshot?: InboxObservationSummary[];
     mentalStateBeforeHash?: string;
     mentalStateAfterHash?: string;
@@ -141,6 +150,54 @@ export async function oneTurn<
     const inboxSnapshot = summarizeInbox(
         Array.isArray(inboxCurrent) ? inboxCurrent : []
     );
+    const conversationIncoming = Array.isArray(inboxCurrent)
+        ? inboxCurrent
+              .filter((obs): obs is Observation => {
+                  if (obs?.source !== 'conversation') {
+                      return false;
+                  }
+                  const pk = (obs as { payload?: { kind?: string } }).payload?.kind;
+                  return pk === 'message.received' || pk === 'topic.message.received';
+              })
+              .map((obs) => {
+                  const message = (obs as { payload: { message: {
+                      id: string;
+                      conversation: { id: string; kind: 'thread' | 'topic' };
+                      senderAgentId: string;
+                      senderMemberId: string;
+                      recipientAgentId: string;
+                      recipientMemberId?: string;
+                      speechAct: string;
+                      sequenceNumber?: number;
+                      correlationId?: string;
+                      idempotencyKey?: string;
+                  } } }).payload.message;
+                  return {
+                      id: message.id,
+                      conversationId: message.conversation.id,
+                      kind: message.conversation.kind,
+                      senderAgentId: message.senderAgentId,
+                      recipientAgentId: message.recipientAgentId,
+                      senderMemberId: message.senderMemberId,
+                      recipientMemberId:
+                          message.recipientMemberId !== undefined
+                              ? String(message.recipientMemberId)
+                              : message.recipientAgentId,
+                      speechAct: message.speechAct,
+                      sequenceNumber: message.sequenceNumber,
+                      correlationId: message.correlationId,
+                      idempotencyKey: message.idempotencyKey,
+                  };
+              })
+        : [];
+    iCtx.__turnIncomingConversationMessages = conversationIncoming;
+    if (conversationIncoming.length > 0) {
+        iCtx.__turnConversationSummary = {
+            id: conversationIncoming[0].conversationId,
+            kind: conversationIncoming[0].kind,
+        };
+        iCtx.__turnConversationSequenceNumber = conversationIncoming[conversationIncoming.length - 1].sequenceNumber;
+    }
 
     // MentalState hash before Learning (will be set after we have mPrev)
     let mentalStateBeforeHash: string | undefined;
@@ -152,6 +209,7 @@ export async function oneTurn<
         alpha = await runWithTiming('attention', () => mods.attention(mPrev, env, mem));
     } catch (error) {
         if (error instanceof InvariantError) throw error;
+        rethrowRuntimeControlFlow(error);
         const errorObj = error instanceof Error ? error : new Error(String(error));
         throw new ModuleExecutionError(FrameworkModule.Attention, errorObj.message, errorObj);
     }
@@ -164,6 +222,7 @@ export async function oneTurn<
         o = await runWithTiming('perception', () => mods.perception(env, alpha, mem));
     } catch (error) {
         if (error instanceof InvariantError) throw error;
+        rethrowRuntimeControlFlow(error);
         const errorObj = error instanceof Error ? error : new Error(String(error));
         throw new ModuleExecutionError(FrameworkModule.Perception, errorObj.message, errorObj);
     }
@@ -193,6 +252,7 @@ export async function oneTurn<
         });
     } catch (error) {
         if (error instanceof InvariantError) throw error;
+        rethrowRuntimeControlFlow(error);
         const errorObj = error instanceof Error ? error : new Error(String(error));
         throw new ModuleExecutionError(FrameworkModule.Learning, errorObj.message, errorObj);
     }
@@ -216,6 +276,7 @@ export async function oneTurn<
         }
     } catch (error) {
         if (error instanceof InvariantError) throw error;
+        rethrowRuntimeControlFlow(error);
         const errorObj = error instanceof Error ? error : new Error(String(error));
         throw new ModuleExecutionError(FrameworkModule.Policy, errorObj.message, errorObj);
     }
@@ -229,14 +290,15 @@ export async function oneTurn<
 
     let chosen = Array.isArray(pi) ? pi[0].action : pi;
     if (Array.isArray(pi)) {
+        const rnd = iCtx.__random ?? Math.random;
         const eps = m1.policyParams?.explorationEpsilon ?? 0;
         const temp = m1.policyParams?.temperature ?? 1;
         const stochastic = m1.policyParams?.stochastic ?? true;
         const probs = pi.map(p => Math.max(0, Number(p.prob) || 0));
         const weights = probs.map(p => (temp && temp > 0 && temp !== 1) ? Math.pow(p, 1 / temp) : p);
         if (!stochastic) {
-            if (Math.random() < eps) {
-                const idx = Math.floor(Math.random() * pi.length);
+            if (rnd() < eps) {
+                const idx = Math.floor(rnd() * pi.length);
                 chosen = pi[idx].action;
             } else {
                 let maxIdx = 0; let maxVal = weights[0] ?? 0;
@@ -246,12 +308,12 @@ export async function oneTurn<
                 chosen = pi[maxIdx].action;
             }
         } else {
-            if (Math.random() < eps) {
-                const idx = Math.floor(Math.random() * pi.length);
+            if (rnd() < eps) {
+                const idx = Math.floor(rnd() * pi.length);
                 chosen = pi[idx].action;
             } else {
                 const sum = weights.reduce((a, b) => a + b, 0) || 1;
-                let t = Math.random() * sum;
+                let t = rnd() * sum;
                 let selected = pi[0].action;
                 for (let i = 0; i < weights.length; i++) {
                     t -= weights[i];
@@ -267,6 +329,7 @@ export async function oneTurn<
         sh = await runWithTiming('shield', () => mods.shield(m1, chosen, mem));
     } catch (error) {
         if (error instanceof InvariantError) throw error;
+        rethrowRuntimeControlFlow(error);
         const errorObj = error instanceof Error ? error : new Error(String(error));
         throw new ModuleExecutionError(FrameworkModule.Shield, errorObj.message, errorObj);
     }
@@ -293,33 +356,95 @@ export async function oneTurn<
             toExecute = { kind: 'internal', intent: 'noop' } as Intent;
     }
 
+    let consentDeferredToken: string | undefined;
+    let activeConsentReceipt: IntentConsentReceipt | undefined;
+    let manifestConsentOut: ManifestConsentTrace | undefined;
+    if (sh.action === 'pass' || sh.action === 'transform') {
+        const target = manifestConsentTarget(toExecute!, iCtx.__manifestHitl);
+        if (target) {
+            const digest = digestIntent(toExecute!);
+            const receipts = env.pending.manifestConsents ?? (env.pending.manifestConsents = {});
+            const now = new Date();
+            const matchingReceipts = Object.values(receipts).filter((receipt) =>
+                receipt.intentId === target.intentId && receipt.intentDigest === digest
+            );
+            const authorized = matchingReceipts.find((receipt) => receipt.status === 'approved' || receipt.status === 'dispatching');
+            const pending = matchingReceipts.find((receipt) => receipt.status === 'pending');
+            if (authorized) {
+                authorized.status = 'dispatching';
+                activeConsentReceipt = authorized;
+                manifestConsentOut = { action: 'dispatch', reason: 'manifest_consent_approved', intentId: target.intentId, tokenPresent: true, receiptStatus: 'dispatching' };
+                ctx.effect = { idempotencyKey: authorized.effectIdempotencyKey };
+                const flush = (ctx as TaskContext & { flushSnapshot?: (state: { M: MentalState<Sensory>; env: EnvironmentState }) => Promise<void> }).flushSnapshot;
+                if (flush) await flush({ M: m1, env });
+            } else if (pending && Date.parse(pending.expiresAt) > now.getTime()) {
+                consentDeferredToken = pending.token;
+                manifestConsentOut = { action: 'defer', reason: 'manifest_consent_required', intentId: target.intentId, tokenPresent: true, receiptStatus: 'pending' };
+            } else {
+                if (pending) pending.status = 'expired';
+                const ttlMs = iCtx.__manifestHitl?.consentTtlMs ?? DEFAULT_MANIFEST_CONSENT_TTL_MS;
+                const handle = await ctx.requestInput(sanitizedConsentPrompt(target.intentId, target.kind), {
+                    schema: MANIFEST_CONSENT_INPUT_SCHEMA,
+                    ttlMs,
+                    setToken: false,
+                });
+                const token = handle.token;
+                const receipt: IntentConsentReceipt = {
+                    token,
+                    taskId: ctx.task.id,
+                    agentId: String(ctx.agentId ?? 'default'),
+                    tenantId: String(ctx.tenantId ?? 'default'),
+                    intentId: target.intentId,
+                    intentDigest: digest,
+                    requestedAt: now.toISOString(),
+                    expiresAt: new Date(now.getTime() + ttlMs).toISOString(),
+                    effectIdempotencyKey: '',
+                    status: 'pending',
+                };
+                receipt.effectIdempotencyKey = deriveConsentEffectKey(receipt);
+                receipts[token] = receipt;
+                consentDeferredToken = token;
+                manifestConsentOut = { action: 'defer', reason: 'manifest_consent_required', intentId: target.intentId, tokenPresent: true, receiptStatus: 'pending' };
+                const flush = (ctx as TaskContext & { flushSnapshot?: (state: { M: MentalState<Sensory>; env: EnvironmentState }) => Promise<void> }).flushSnapshot;
+                if (flush) await flush({ M: m1, env });
+            }
+        }
+    }
+
     const tE0 = Date.now();
     if (iCtx.telemetry) {
         iCtx.__currentModule = 'execution';
     }
-    let exec: { action: ExecutableAction; result: ExecResult<ExecData, ExecError> };
+    let exec: ExecOutcome<ExecData, ExecError>;
     try {
-        exec = await runWithTiming('execution', () =>
-            mods.execution(toExecute!, ctx, mem, m1)
-        );
+        exec = consentDeferredToken
+            ? ({ action: { kind: 'prompt_user', token: consentDeferredToken }, result: { status: 'ok' } } as ExecOutcome<ExecData, ExecError>)
+            : await runWithTiming('execution', () => mods.execution(toExecute!, ctx, mem, m1));
+        if (activeConsentReceipt) {
+            activeConsentReceipt.status = 'consumed';
+            activeConsentReceipt.consumedAt = new Date().toISOString();
+            manifestConsentOut = { action: 'consume', reason: 'manifest_consent_consumed', intentId: activeConsentReceipt.intentId, tokenPresent: true, receiptStatus: 'consumed' };
+        }
     } catch (error) {
         if (error instanceof InvariantError) throw error;
+        rethrowRuntimeControlFlow(error);
         const errorObj = error instanceof Error ? error : new Error(String(error));
         throw new ModuleExecutionError(FrameworkModule.Execution, errorObj.message, errorObj);
+    } finally {
+        if (activeConsentReceipt) ctx.effect = undefined;
+        if (iCtx.telemetry) iCtx.__currentModule = undefined;
     }
     timings.executionMs = Date.now() - tE0;
-    if (iCtx.telemetry) {
-        iCtx.__currentModule = undefined;
-    }
 
     const tT0 = Date.now();
     let outcome: TransitionOut;
     try {
-        outcome = await runWithTiming('transition', () =>
-            mods.transition(env, exec, m1, mem)
-        );
+        outcome = consentDeferredToken
+            ? { kind: 'await_input', token: consentDeferredToken }
+            : await runWithTiming('transition', () => mods.transition(env, exec, m1, mem));
     } catch (error) {
         if (error instanceof InvariantError) throw error;
+        rethrowRuntimeControlFlow(error);
         const errorObj = error instanceof Error ? error : new Error(String(error));
         throw new ModuleExecutionError(FrameworkModule.Transition, errorObj.message, errorObj);
     }
@@ -377,6 +502,7 @@ export async function oneTurn<
         perception: perceptionOut,
         intent: intentOut,
         shield: shieldOut,
+        ...(manifestConsentOut ? { manifestConsent: manifestConsentOut } : {}),
         inboxSnapshot,
         mentalStateBeforeHash,
         mentalStateAfterHash,

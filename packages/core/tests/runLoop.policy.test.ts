@@ -129,4 +129,28 @@ describe('runLoop default policy and shield branches', () => {
         expect(result.outcome.kind).toBe('await_child');
         expect((result.outcome as any).token).toBe('child-token');
     });
+
+    it('returns await_event when pending external events exist even if execution returned internal', async () => {
+        const ctx: any = { task: { id: 'policy-pending-event', input: {} }, reply: jest.fn() };
+        const M: any = initialM(ctx);
+        const env = baseEnv({
+            pending: { inputs: {}, tools: {}, groups: {}, children: {}, events: { 'event-token': { type: 'webhook.received' } } } as any
+        });
+
+        const execution = jest.fn(async () => ({
+            action: { kind: 'internal', done: true },
+            result: { status: 'ok' }
+        }));
+
+        const result = await runLoop(
+            ctx,
+            M,
+            env,
+            { policy: () => ({ kind: 'internal', intent: 'noop' }), execution } as any,
+            { maxTurns: 1 }
+        );
+
+        expect(result.outcome.kind).toBe('await_event');
+        expect((result.outcome as any).token).toBe('event-token');
+    });
 });

@@ -56,6 +56,41 @@ describe('TurnTraceSchema', () => {
         expect(() => TurnTraceSchema.parse(trace)).not.toThrow();
     });
 
+    it('accepts llm call contract metadata fields', () => {
+        const trace = minimalTrace({
+            llmCalls: [{
+                model: 'gpt-4o-mini',
+                hasOutputContract: true,
+                outputContractName: 'GreetingSchema',
+                outputContractStatus: 'matched',
+            }],
+        });
+        const parsed = TurnTraceSchema.parse(trace);
+        expect(parsed.llmCalls?.[0]?.hasOutputContract).toBe(true);
+        expect(parsed.llmCalls?.[0]?.outputContractStatus).toBe('matched');
+    });
+
+    it('accepts optional conversation metadata on TurnTrace', () => {
+        const trace = minimalTrace({
+            conversation: { id: 'thread-1', kind: 'thread' },
+            incomingMessages: [],
+            outgoingMessages: [
+                {
+                    id: 'm1',
+                    conversationId: 'thread-1',
+                    kind: 'thread',
+                    senderAgentId: 'a',
+                    recipientAgentId: 'b',
+                    speechAct: 'request',
+                    sequenceNumber: 1,
+                },
+            ],
+            messageSequenceNumber: 1,
+            dedupeHit: false,
+        });
+        expect(() => TurnTraceSchema.parse(trace)).not.toThrow();
+    });
+
     it('rejects missing required turn', () => {
         const bad = minimalTrace();
         delete (bad as Partial<TurnTrace>).turn;

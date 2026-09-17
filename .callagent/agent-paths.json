@@ -1,78 +1,37 @@
 {
-  "create": {
-    "module": "../apps/examples/interactive-a2a-demo/dist/packages/core/src/plugin/createAgent.js",
-    "manifest": "../apps/examples/interactive-a2a-demo/dist/packages/core/src/plugin/createAgent.js"
-  },
-  "telegram-bridge-demo": {
-    "module": "../apps/examples/telegram-bridge-demo/dist/apps/examples/telegram-bridge-demo/AgentModule.js",
-    "manifest": "../apps/examples/telegram-bridge-demo/dist/apps/examples/telegram-bridge-demo/AgentModule.js"
-  },
-  "bug-repro": {
-    "module": "../apps/examples/aplret-bug-reproduction/dist/BugReproAgent.js",
-    "manifest": "../apps/examples/aplret-bug-reproduction/dist/BugReproAgent.js"
-  },
-  "helper": {
-    "module": "../apps/examples/aplret-bug-reproduction/dist/HelperAgent.js",
-    "manifest": "../apps/examples/aplret-bug-reproduction/dist/HelperAgent.js"
+  "conversation-panel-orchestrator-agent": {
+    "module": "../apps/examples/conversation-panel-orchestrator-agent/dist/agent.js",
+    "agentCard": "../apps/examples/conversation-panel-orchestrator-agent/agent-card.json",
+    "runtimeManifest": "../apps/examples/conversation-panel-orchestrator-agent/agent-runtime.json"
   },
   "dist": {
-    "module": "../apps/examples/artifact-demo/dist/agent.js",
-    "manifest": "../apps/examples/artifact-demo/dist/agent.js"
+    "module": "../apps/examples/conversation-panel-orchestrator-agent/dist/agent.js",
+    "agentCard": "../apps/examples/conversation-panel-orchestrator-agent/agent-card.json",
+    "runtimeManifest": "../apps/examples/conversation-panel-orchestrator-agent/agent-runtime.json"
   },
-  "child-agent": {
-    "module": "../apps/examples/artifact-demo/dist/child-agent.js",
-    "manifest": "../apps/examples/artifact-demo/dist/child-agent.js"
+  "conversation-panel-persona-agent": {
+    "module": "../apps/examples/conversation-panel-persona-agent/dist/agent.js",
+    "agentCard": "../apps/examples/conversation-panel-persona-agent/agent-card.json",
+    "runtimeManifest": "../apps/examples/conversation-panel-persona-agent/agent-runtime.json"
   },
-  "arithmetic": {
-    "module": "../apps/examples/calculator-workflow/dist/ArithmeticAgent.js",
-    "manifest": "../apps/examples/calculator-workflow/dist/ArithmeticAgent.js"
+  "conversation-reference-agent": {
+    "module": "../apps/examples/conversation-reference-agent/dist/agent.js",
+    "agentCard": "../apps/examples/conversation-reference-agent/agent-card.json",
+    "runtimeManifest": "../apps/examples/conversation-reference-agent/agent-runtime.json"
   },
-  "coordinator": {
-    "module": "../apps/examples/calculator-workflow/dist/CoordinatorAgent.js",
-    "manifest": "../apps/examples/calculator-workflow/dist/CoordinatorAgent.js"
+  "conversation-responder-agent": {
+    "module": "../apps/examples/conversation-responder-agent/dist/agent.js",
+    "agentCard": "../apps/examples/conversation-responder-agent/agent-card.json",
+    "runtimeManifest": "../apps/examples/conversation-responder-agent/agent-runtime.json"
   },
-  "multiplication": {
-    "module": "../apps/examples/calculator-workflow/dist/MultiplicationAgent.js",
-    "manifest": "../apps/examples/calculator-workflow/dist/MultiplicationAgent.js"
+  "flow-reference-agent": {
+    "module": "../apps/examples/flow-reference-agent/dist/agent.js",
+    "agentCard": "../apps/examples/flow-reference-agent/agent-card.json",
+    "runtimeManifest": "../apps/examples/flow-reference-agent/agent-runtime.json"
   },
-  "subtraction": {
-    "module": "../apps/examples/calculator-workflow/dist/SubtractionAgent.js",
-    "manifest": "../apps/examples/calculator-workflow/dist/SubtractionAgent.js"
-  },
-  "subtraction-agent": {
-    "module": "../apps/examples/calculator-workflow/dist/SubtractionAgent.js",
-    "manifest": "../apps/examples/calculator-workflow/dist/subtraction-agent.json"
-  },
-  "child": {
-    "module": "../apps/examples/child-observation-staging-bug/dist/ChildAgent.js",
-    "manifest": "../apps/examples/child-observation-staging-bug/dist/ChildAgent.js"
-  },
-  "parent": {
-    "module": "../apps/examples/child-observation-staging-bug/dist/ParentAgent.js",
-    "manifest": "../apps/examples/child-observation-staging-bug/dist/ParentAgent.js"
-  },
-  "analyzer": {
-    "module": "../apps/examples/interactive-a2a-demo/dist/AnalyzerAgent.js",
-    "manifest": "../apps/examples/interactive-a2a-demo/dist/AnalyzerAgent.js"
-  },
-  "extractor": {
-    "module": "../apps/examples/interactive-a2a-demo/dist/ExtractorAgent.js",
-    "manifest": "../apps/examples/interactive-a2a-demo/dist/ExtractorAgent.js"
-  },
-  "orchestrator": {
-    "module": "../apps/examples/interactive-a2a-demo/dist/OrchestratorAgent.js",
-    "manifest": "../apps/examples/interactive-a2a-demo/dist/OrchestratorAgent.js"
-  },
-  "simple-orchestrator": {
-    "module": "../apps/examples/interactive-a2a-demo/dist/SimpleOrchestratorAgent.js",
-    "manifest": "../apps/examples/interactive-a2a-demo/dist/SimpleOrchestratorAgent.js"
-  },
-  "loop-await-child-demo-child": {
-    "module": "../apps/examples/loop-await-child-demo/dist/LoopAwaitChildDemoChildAgent.js",
-    "manifest": "../apps/examples/loop-await-child-demo/dist/LoopAwaitChildDemoChildAgent.js"
-  },
-  "loop-await-child-demo-parent": {
-    "module": "../apps/examples/loop-await-child-demo/dist/LoopAwaitChildDemoParentAgent.js",
-    "manifest": "../apps/examples/loop-await-child-demo/dist/LoopAwaitChildDemoParentAgent.js"
+  "hello-agent": {
+    "module": "../apps/examples/hello-agent/dist/AgentModule.js",
+    "agentCard": "../apps/examples/hello-agent/agent-card.json",
+    "runtimeManifest": "../apps/examples/hello-agent/agent-runtime.json"
   }
 }

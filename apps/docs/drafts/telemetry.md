@@ -30,18 +30,13 @@ Example output:
 [Turn 2] turnId=... totalMs=80 ...
 ```
 
-### Opik (observability platform)
+### External telemetry
 
-To stream to [Opik](https://www.comet.com/site/products/opik/):
-
-1. Set `CALLAGENT_OPIK_ENABLED=true` (or provide the API key).
-2. Configure `OPIK_API_KEY`, `OPIK_WORKSPACE`, `OPIK_PROJECT_NAME`.
-
-The **OpikProvider** maps:
-
-- **AgentNode** → Trace
-- **TurnNode** (with **TurnTrace** attached) → Span; turn-level fields (timings, usage, llmCalls, toolCalls, childCalls) are available on the span or as child spans.
-- **LLMNode**, **ToolNode**, **ChildCallNode** → Child spans of the TurnNode.
+Callagent no longer ships a built-in external trace exporter. Keep full
+prompt/response telemetry in the application layer or in callllm, and keep
+callagent focused on compact TurnTrace, operator events, and `/metrics` JSON.
+Custom integrations can still be registered manually through the generic
+`TelemetryProvider` interface.
 
 ## Manual configuration
 

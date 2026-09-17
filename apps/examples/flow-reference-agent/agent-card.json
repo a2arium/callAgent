@@ -1,0 +1,30 @@
+{
+  "name": "flow-reference-agent",
+  "version": "0.1.0",
+  "description": "Non-trivial reference: flow.md, selectors, reducers, normalizers.",
+  "supportedInterfaces": [
+    {
+      "url": "http://localhost:3000/a2a",
+      "protocolBinding": "JSONRPC",
+      "protocolVersion": "1.0"
+    }
+  ],
+  "capabilities": {
+    "streaming": false,
+    "pushNotifications": false
+  },
+  "defaultInputModes": [
+    "text/plain"
+  ],
+  "defaultOutputModes": [
+    "text/plain"
+  ],
+  "skills": [
+    {
+      "id": "default",
+      "name": "Default",
+      "description": "Scaffolded agent skill — replace with real capabilities."
+    }
+  ],
+  "url": "http://localhost:3000"
+}

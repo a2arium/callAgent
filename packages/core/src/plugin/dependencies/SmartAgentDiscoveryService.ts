@@ -539,24 +539,7 @@ export class SmartAgentDiscoveryService {
         const possibleNames = this.generateAgentFilenames(name);
 
         try {
-            const files = await fs.readdir(dir);
-
-            // Check for exact filename matches (case-insensitive)
-            for (const file of files) {
-                for (const possibleName of possibleNames) {
-                    if (file.toLowerCase() === possibleName.toLowerCase()) {
-                        const fullPath = path.join(dir, file);
-                        try {
-                            await fs.access(fullPath);
-                            return fullPath;
-                        } catch {
-                            continue;
-                        }
-                    }
-                }
-            }
-
-            // Also check dist subdirectory
+            // Prefer compiled `dist/` entrypoints when present (avoid importing root `agent.ts` in examples)
             const distDir = path.join(dir, 'dist');
             try {
                 const distFiles = await fs.readdir(distDir);
@@ -576,6 +559,21 @@ export class SmartAgentDiscoveryService {
             } catch {
                 // No dist directory
             }
+
+            const files = await fs.readdir(dir);
+            for (const file of files) {
+                for (const possibleName of possibleNames) {
+                    if (file.toLowerCase() === possibleName.toLowerCase()) {
+                        const fullPath = path.join(dir, file);
+                        try {
+                            await fs.access(fullPath);
+                            return fullPath;
+                        } catch {
+                            continue;
+                        }
+                    }
+                }
+            }
         } catch {
             // Directory not accessible
         }
@@ -587,7 +585,10 @@ export class SmartAgentDiscoveryService {
      * Check if an agent-card.json exists for the given agent path and name
      */
     private static async checkCardExists(agentPath: string, expectedName: string): Promise<boolean> {
-        const agentDir = path.dirname(agentPath);
+        let agentDir = path.dirname(agentPath);
+        if (path.basename(agentDir).toLowerCase() === 'dist') {
+            agentDir = path.dirname(agentDir);
+        }
         const cardPath = path.join(agentDir, 'agent-card.json');
 
         try {
@@ -708,7 +709,10 @@ export class SmartAgentDiscoveryService {
             return null;
         }
 
-        const agentDir = path.dirname(agentPath);
+        let agentDir = path.dirname(agentPath);
+        if (path.basename(agentDir).toLowerCase() === 'dist') {
+            agentDir = path.dirname(agentDir);
+        }
         const cardPath = path.join(agentDir, 'agent-card.json');
         const runtimePath = path.join(agentDir, 'agent-runtime.json');
 

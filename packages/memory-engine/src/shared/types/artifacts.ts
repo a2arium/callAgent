@@ -13,9 +13,13 @@ export interface ArtifactHandle<T = unknown> extends PromiseLike<T> {
     load(): Promise<T>;
 }
 
+export type ArtifactRetentionResult = 'retained' | 'released' | 'deleted' | 'referenced';
+
 // 2. The local wrapper (stored in RAM, resolves immediately)
 export interface LocalArtifact<T = unknown> extends PromiseLike<T> {
     kind: typeof LOCAL_ARTIFACT_KIND;
+    /** Stable identity used to publish cloned copies exactly once. */
+    publicationId?: string;
     value: T;
     mimeType?: string;
 }
@@ -49,6 +53,7 @@ export const Artifact = {
         const mimeType = options?.mimeType ?? inferMimeType(value);
         return {
             kind: LOCAL_ARTIFACT_KIND,
+            publicationId: uuidv4(),
             value,
             mimeType,
             then<TResult1 = T, TResult2 = never>(

@@ -1,0 +1,26 @@
+{
+  "name": "conversation-panel-orchestrator-agent",
+  "version": "0.1.0",
+  "description": "Creates a topic with one multi-seat participant agent (Phase 2a) and runs a 2×3 moderated round.",
+  "supportedInterfaces": [
+    {
+      "url": "http://localhost:3000/a2a",
+      "protocolBinding": "JSONRPC",
+      "protocolVersion": "1.0"
+    }
+  ],
+  "capabilities": {
+    "streaming": false,
+    "pushNotifications": false
+  },
+  "defaultInputModes": ["text/plain"],
+  "defaultOutputModes": ["text/plain"],
+  "skills": [
+    {
+      "id": "panel-orchestrate",
+      "name": "Panel orchestrate",
+      "description": "Runs the triad topic demo with explicit member seats."
+    }
+  ],
+  "url": "http://localhost:3000"
+}

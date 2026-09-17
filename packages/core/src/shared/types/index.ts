@@ -7,7 +7,16 @@ import type { TaskStatus, A2AEvent, Artifact as ProtocolArtifact } from './Strea
 // A2A (Agent-to-Agent) Communication Types
 export * from './A2ATypes.js';
 import type { IMemory } from '@a2arium/callagent-types';
-import type { GoalId, GoalNode, GoalStatus, GoalType } from '../../loop/types.js';
+import type {
+    EpisodicEvent,
+    GoalId,
+    GoalNode,
+    GoalStatus,
+    GoalType,
+    TaskContextGoalAddInput,
+    TaskContextGoalUpdatePatch,
+    TaskContextGoalsReadFilter,
+} from '../../loop/types.js';
 
 // Import from memory-engine to satisfy local usage in TaskContext
 import { Artifact } from '@a2arium/callagent-memory-engine';
@@ -33,6 +42,8 @@ export type { TaskHandle, InputHandle, GroupHandle } from '../../orchestration/H
 export type { A2AEvent, TaskStatus, ProtocolArtifact };
 
 import type { InvariantErrorCode, InvariantErrorContext, InvariantErrorDetail } from '../../types/invariantError.js';
+import type { ConversationApi } from '../../public-types/conversation/types.js';
+import type { RunProgressReportResult, RunProgressSnapshot } from '../../progress/runProgress.js';
 
 
 // Export the unified Artifact type and interfaces
@@ -100,6 +111,8 @@ export type TaskInput = {
 
 // --- Task Context (Interface for agent task handling) ---
 export type TaskContext = {
+    /** Aborted when the active runtime attempt is cancelled or loses its lease. */
+    readonly abortSignal?: AbortSignal;
     // Readonly mental state view for queries
     M?: Readonly<import('../../loop/types.js').MentalState>;
     // Tenant context for multi-tenant operations
@@ -111,9 +124,17 @@ export type TaskContext = {
         input: TaskInput;
         // Future: status, artifacts, createdAt, etc.
     };
+    /** Manifest-gated admission of independent same-tenant root tasks. */
+    tasks?: {
+        submit: (
+            agentId: string,
+            input: unknown,
+            options: { taskId: string; maxTurns?: number; taskRunTimeoutMs?: number }
+        ) => Promise<import('../../orchestration/TaskSubmission.js').SubmitTaskResult>;
+    };
     // Basic Output & Status Control (Implemented minimally)
     reply: (parts: string | string[] | MessagePart | MessagePart[]) => Promise<void>;
-    progress: ((pct: number, msg?: string) => void) & ((status: TaskStatus) => void); // Support both signatures
+    progress: TaskProgress;
     complete: (pct?: number, status?: string) => void; // Basic console log
     fail: (error: unknown) => Promise<void>; // Added fail method
 
@@ -125,6 +146,32 @@ export type TaskContext = {
     // Telemetry Context
     telemetry?: {
         nodeId?: string; // Current node ID (AgentNode or TurnNode)
+        traceId?: string;
+    };
+
+    /** Present only while Execution is dispatching a manifest-approved effect. */
+    effect?: {
+        readonly idempotencyKey: string;
+    };
+
+    /**
+     * Run an agent-owned external mutation behind CallAgent's durable lifecycle,
+     * turn-fence, and worker-lifetime supervision boundary.
+     *
+     * The external system remains the authority for replaying the supplied
+     * idempotency key. CallAgent guarantees that a stale or terminal attempt
+     * cannot begin the callback and aborts an active callback when ownership is
+     * lost.
+     */
+    effects?: {
+        run: <T>(
+            input: {
+                kind: string;
+                idempotencyKey: string;
+                operation?: string;
+            },
+            execute: (control: { readonly signal: AbortSignal; readonly idempotencyKey: string }) => Promise<T>
+        ) => Promise<T>;
     };
 
     // Use the ILLMCaller interface for llm, allow optional state (de)serialization
@@ -150,17 +197,38 @@ export type TaskContext = {
          * Helper to create a JSON artifact.
          */
         json<T>(val?: T): ArtifactType<T>;
+
+        /** Protect an artifact from TTL cleanup while a durable owner references it. */
+        retain(artifact: ArtifactHandle<unknown>, ownerId: string): Promise<void>;
+
+        /** Atomically protect many artifacts under the same durable owner. */
+        retainMany(artifacts: readonly ArtifactHandle<unknown>[], ownerId: string): Promise<void>;
+
+        /** Protect already-persisted artifact IDs without materializing payloads. */
+        retainIds(artifactIds: readonly string[], ownerId: string): Promise<void>;
+
+        /** Copy immutable artifact protection from a predecessor checkpoint owner. */
+        inheritOwner(fromOwnerId: string, toOwnerId: string, excludedArtifactIds?: readonly string[]): Promise<readonly string[]>;
+
+        /** Release one durable owner reference. The artifact is not deleted implicitly. */
+        release(artifactId: string, ownerId: string): Promise<void>;
+
+        /** Release all references owned by a terminal durable checkpoint. */
+        releaseOwner(ownerId: string): Promise<number>;
+
+        /** Delete an unreferenced artifact. Returns false while any owner retains it. */
+        delete(artifactId: string): Promise<boolean>;
     };
 
     // Namespaced helpers (minimal, ergonomic)
     goals?: {
-        add: (g: any) => Promise<string> | string;
-        update: (id: string, patch: any) => Promise<void> | void;
-        remove: (id: string) => Promise<void> | void;
-        clear: (predicate?: (g: any) => boolean) => Promise<void> | void;
-        read: (filter?: any) => Promise<any[]> | any[];
+        add: (g: TaskContextGoalAddInput) => Promise<GoalId> | GoalId;
+        update: (id: GoalId, patch: TaskContextGoalUpdatePatch) => Promise<void> | void;
+        remove: (id: GoalId) => Promise<void> | void;
+        clear: (predicate?: (g: GoalNode) => boolean) => Promise<void> | void;
+        read: (filter?: TaskContextGoalsReadFilter) => Promise<GoalNode[]> | GoalNode[];
     };
-    episodic?: { add: (e: any) => void };
+    episodic?: { add: (e: EpisodicEvent) => void };
     thoughts?: { add: (t: { text: string } | string) => Promise<void> | void };
 
     world?: { read: () => Readonly<Record<string, unknown>> };
@@ -187,6 +255,7 @@ export type TaskContext = {
     services: { get: <T = unknown>(name: string) => T | undefined }; // Placeholder for service registry
     getEnv: (key: string, defaultValue?: string) => string | undefined;
     throw: (code: InvariantErrorCode, message: string, detail: InvariantErrorDetail, context?: InvariantErrorContext) => never; // Structured error throw
+    conversation?: ConversationApi;
 
     sendTaskToAgent: {
         /**
@@ -215,7 +284,10 @@ export type TaskContext = {
             onProvided?: string;
             onExpired?: string;
             setToken?: boolean;
-            setStage?: string
+            setStage?: string;
+            planId?: string;
+            stepId?: string;
+            advanceCursor?: boolean;
         }
     ) => Promise<import('../../orchestration/Handles.js').InputHandle>;
 
@@ -232,6 +304,9 @@ export type TaskContext = {
             awaitCompletion?: boolean;
             onCompleted?: string;
             onFailed?: string;
+            planId?: string;
+            stepId?: string;
+            advanceCursor?: boolean;
         }
     ) => Promise<import('../../orchestration/Handles.js').TaskHandle>;
 
@@ -275,14 +350,17 @@ export type AgentTaskContext = Required<Pick<TaskContext,
  * }
  * ```
  */
+function isRecord(x: unknown): x is Record<string, unknown> {
+    return typeof x === 'object' && x !== null;
+}
+
 export function ensureAgentContext(ctx: TaskContext): AgentTaskContext {
     // Runtime validation to ensure all required methods are present
-    const requiredMethods = [
-        'recall', 'remember', 'sendTaskToAgent'
-    ];
+    const requiredMethods = ['recall', 'remember', 'sendTaskToAgent'] as const;
 
     for (const method of requiredMethods) {
-        if (typeof (ctx as any)[method] !== 'function') {
+        const fn = ctx[method];
+        if (typeof fn !== 'function') {
             throw new Error(`Agent context is missing required method: ${method}. Ensure the agent is run through the proper runner with memory support.`);
         }
     }
@@ -305,6 +383,12 @@ export type ChildCompletionInput = {
     childTaskId?: string;
     agentId?: string;
     result: unknown;
+};
+
+export type TaskProgress = {
+    (pct: number, msg?: string): void;
+    (status: TaskStatus): void;
+    report?: (snapshot: RunProgressSnapshot) => Promise<RunProgressReportResult>;
 };
 
 /**
@@ -333,20 +417,20 @@ export type InputKind = ChildCompletionInput | ToolCompletionInput | DirectInput
 
 /** True if value is a child agent completion payload. */
 export function isChildCompletionInput(x: unknown): x is ChildCompletionInput {
-    return !!x && typeof x === 'object' && (x as any).kind === 'child' && typeof (x as any).token === 'string';
+    return isRecord(x) && x.kind === 'child' && typeof x.token === 'string';
 }
 
 /** True if value is a tool completion payload. */
 export function isToolCompletionInput(x: unknown): x is ToolCompletionInput {
-    return !!x && typeof x === 'object' && (x as any).kind === 'tool' && typeof (x as any).token === 'string';
+    return isRecord(x) && x.kind === 'tool' && typeof x.token === 'string';
 }
 
 /** True if value is a direct human input payload. */
 export function isDirectInput(x: unknown): x is DirectInput {
-    return !!x && typeof x === 'object' && (x as any).kind === 'input' && 'value' in (x as any);
+    return isRecord(x) && x.kind === 'input' && 'value' in x;
 }
 
 /** True if value is an external event payload. */
 export function isExternalEventInput(x: unknown): x is ExternalEventInput {
-    return !!x && typeof x === 'object' && (x as any).kind === 'external' && 'event' in (x as any);
+    return isRecord(x) && x.kind === 'external' && 'event' in x;
 }

@@ -4,6 +4,16 @@ import type { PrismaClient as PrismaClientType } from '@a2arium/callagent-memory
 import type { TaskInput } from '../shared/types/index.js';
 import { logger } from '@a2arium/callagent-utils';
 
+export class ArtifactPublicationConflictError extends Error {
+    readonly code = 'ARTIFACT_PUBLICATION_CONFLICT';
+
+    constructor(public readonly artifactId: string) {
+        super(`ARTIFACT_PUBLICATION_CONFLICT: artifact ${artifactId} was already published with different content`);
+        this.name = 'ArtifactPublicationConflictError';
+        Object.setPrototypeOf(this, ArtifactPublicationConflictError.prototype);
+    }
+}
+
 /**
  * Agent Result Cache Service
  * 
@@ -49,6 +59,12 @@ export class AgentResultCache {
                 });
                 return cached.result as T;
             } else if (cached && cached.expiresAt <= new Date()) {
+                if (agentName === 'artifact_store') {
+                    const retained = await this.prisma.artifactReference.count({
+                        where: { cacheEntryId: cached.id },
+                    });
+                    if (retained > 0) return cached.result as T;
+                }
                 // Remove expired entry
                 await this.prisma.agentResultCache.delete({
                     where: { id: cached.id }
@@ -141,18 +157,81 @@ export class AgentResultCache {
         const id = artifactId || crypto.randomUUID();
         // We use the virtual agent 'artifact_store' and cacheKey = artifactId
         // This reuses the existing table structure without changes.
-        const size = JSON.stringify(value).length;
+        const serialized = JSON.stringify(value);
+        if (serialized === undefined) {
+            throw new Error('Artifact value is not JSON serializable');
+        }
+        const size = serialized.length;
+        const agentName = 'artifact_store';
+        const cacheKey = this.generateCacheKey({ artifactId: id }, []);
+        const expiresAt = new Date(Date.now() + 86400 * 30 * 1000);
 
-        await this.setCachedResult(
-            'artifact_store',
-            { artifactId: id }, // Mock input
-            value,
-            86400 * 30, // 30 days
-            [],
-            tenantId
-        );
+        // Artifact publication is not a best-effort cache write. Returning an ID
+        // after a rejected write creates an unusable durable marker, so propagate
+        // the storage error to the persistence boundary.
+        // Do not use the generated-model JSON upsert here. Prisma's JS driver
+        // adapter retains the encoded JSON argument after each model write, so
+        // a sequence of bounded artifacts grows the heap with the total bytes
+        // written. A parameterized scalar SQL write has identical persistence
+        // semantics and releases each serialized payload after the await.
+        if (typeof this.prisma.$executeRaw === 'function') {
+            await this.prisma.$executeRaw`
+                INSERT INTO agent_result_cache
+                    (id, tenant_id, agent_name, cache_key, result, created_at, expires_at)
+                VALUES
+                    (${id}, ${tenantId}, ${agentName}, ${cacheKey}, ${serialized}::jsonb, NOW(), ${expiresAt})
+                ON CONFLICT (tenant_id, agent_name, cache_key)
+                DO UPDATE SET
+                    result = EXCLUDED.result,
+                    expires_at = EXCLUDED.expires_at,
+                    created_at = NOW()
+            `;
+        } else {
+            // Lightweight/custom adapters used by tests and embedders may only
+            // implement the generated model surface. They preserve historical
+            // behavior; the PostgreSQL runtime always exposes $executeRaw.
+            await this.prisma.agentResultCache.upsert({
+                where: { tenantId_agentName_cacheKey: { tenantId, agentName, cacheKey } },
+                update: { result: value as any, expiresAt, createdAt: new Date() },
+                create: { id, tenantId, agentName, cacheKey, result: value as any, expiresAt },
+                select: { id: true },
+            });
+        }
 
         return { size, artifactId: id };
+    }
+
+    /**
+     * Publishes an immutable local artifact. Repeated publication of identical
+     * cloned content reuses the row; conflicting content fails closed.
+     */
+    async publishArtifact(
+        tenantId: string,
+        artifactId: string,
+        value: unknown,
+        _mimeType?: string
+    ): Promise<{ size: number; artifactId: string }> {
+        const size = JSON.stringify(value).length;
+        const agentName = 'artifact_store';
+        const cacheKey = this.generateCacheKey({ artifactId }, []);
+        const expiresAt = new Date(Date.now() + 86400 * 30 * 1000);
+        const stored = await this.prisma.agentResultCache.upsert({
+            where: {
+                tenantId_agentName_cacheKey: { tenantId, agentName, cacheKey }
+            },
+            update: { expiresAt },
+            create: {
+                tenantId,
+                agentName,
+                cacheKey,
+                result: value as any,
+                expiresAt
+            }
+        });
+        if (!this.jsonValuesEqual(stored.result, value)) {
+            throw new ArtifactPublicationConflictError(artifactId);
+        }
+        return { size, artifactId };
     }
 
     /**
@@ -169,6 +248,203 @@ export class AgentResultCache {
             throw new Error(`Artifact ${artifactId} not found`);
         }
         return result;
+    }
+
+    /** Protect one stored artifact while a durable checkpoint owner references it. */
+    async retainArtifact(tenantId: string, artifactId: string, ownerId: string): Promise<void> {
+        this.assertArtifactIdentity(artifactId, ownerId);
+        const cacheKey = this.generateCacheKey({ artifactId }, []);
+        await this.prisma.$transaction(async (tx: any) => {
+            const entry = await tx.agentResultCache.findUnique({
+                where: { tenantId_agentName_cacheKey: { tenantId, agentName: 'artifact_store', cacheKey } },
+                select: { id: true },
+            });
+            if (!entry) throw new Error(`Artifact ${artifactId} not found`);
+            await tx.artifactReference.upsert({
+                where: { tenantId_artifactId_ownerId: { tenantId, artifactId, ownerId } },
+                update: { cacheEntryId: entry.id },
+                create: { tenantId, artifactId, ownerId, cacheEntryId: entry.id },
+            });
+        });
+    }
+
+    /**
+     * Protect many stored artifacts under one owner without opening one
+     * interactive transaction per artifact. All requested artifacts are
+     * validated before the reference writes, and the batched writes commit in
+     * one database transaction.
+     */
+    async retainArtifacts(tenantId: string, artifactIds: readonly string[], ownerId: string): Promise<number> {
+        this.assertArtifactIdentity('bulk-retain', ownerId);
+        const uniqueIds = [...new Set(artifactIds)];
+        for (const artifactId of uniqueIds) this.assertArtifactIdentity(artifactId, ownerId);
+        if (uniqueIds.length === 0) return 0;
+
+        const batchSize = 1_000;
+        const entries: Array<{ id: string; cacheKey: string }> = [];
+        const idByCacheKey = new Map(uniqueIds.map((artifactId) => [
+            this.generateCacheKey({ artifactId }, []),
+            artifactId,
+        ]));
+        const cacheKeys = [...idByCacheKey.keys()];
+        for (let offset = 0; offset < cacheKeys.length; offset += batchSize) {
+            const page = await this.prisma.agentResultCache.findMany({
+                where: {
+                    tenantId,
+                    agentName: 'artifact_store',
+                    cacheKey: { in: cacheKeys.slice(offset, offset + batchSize) },
+                },
+                select: { id: true, cacheKey: true },
+            });
+            entries.push(...page);
+        }
+
+        const foundKeys = new Set(entries.map((entry) => entry.cacheKey));
+        const missing = cacheKeys.find((cacheKey) => !foundKeys.has(cacheKey));
+        if (missing) throw new Error(`Artifact ${idByCacheKey.get(missing)} not found`);
+
+        const data = entries.map((entry) => ({
+            tenantId,
+            artifactId: idByCacheKey.get(entry.cacheKey)!,
+            ownerId,
+            cacheEntryId: entry.id,
+        }));
+        const writes = [];
+        for (let offset = 0; offset < data.length; offset += batchSize) {
+            writes.push(this.prisma.artifactReference.createMany({
+                data: data.slice(offset, offset + batchSize),
+                skipDuplicates: true,
+            }));
+        }
+        await this.prisma.$transaction(writes);
+        return uniqueIds.length;
+    }
+
+    /**
+     * Copy an existing checkpoint owner's references to a successor owner in
+     * one transaction. The artifact payloads are immutable, so successor
+     * checkpoints can inherit their protection without loading every payload.
+     */
+    async inheritArtifactOwner(tenantId: string, fromOwnerId: string, toOwnerId: string, excludedArtifactIds: readonly string[] = []): Promise<readonly string[]> {
+        this.assertArtifactIdentity('owner-inherit', fromOwnerId);
+        this.assertArtifactIdentity('owner-inherit', toOwnerId);
+        if (fromOwnerId === toOwnerId) {
+            const existing: Array<{ artifactId: string }> = await this.prisma.artifactReference.findMany({
+                where: { tenantId, ownerId: fromOwnerId },
+                select: { artifactId: true },
+            });
+            return existing.map((reference) => reference.artifactId);
+        }
+        const excluded = [...new Set(excludedArtifactIds)];
+        for (const artifactId of excluded) this.assertArtifactIdentity(artifactId, toOwnerId);
+        const pageSize = 500;
+        const inherited: string[] = [];
+        let cursor: string | undefined;
+        // The predecessor owner remains authoritative until its successor wins
+        // the caller's checkpoint CAS. Copying in retryable pages therefore
+        // keeps every transaction bounded without exposing an unprotected
+        // artifact window. A response loss is safe: createMany is idempotent
+        // and a retry may copy an already-inherited page again.
+        for (;;) {
+            const page = await this.prisma.$transaction(async (tx: any) => {
+                const existing: Array<{ artifactId: string; cacheEntryId: string }> = await tx.artifactReference.findMany({
+                    where: {
+                        tenantId,
+                        ownerId: fromOwnerId,
+                        ...(excluded.length || cursor ? {
+                            artifactId: {
+                                ...(excluded.length ? { notIn: excluded } : {}),
+                                ...(cursor ? { gt: cursor } : {}),
+                            },
+                        } : {}),
+                    },
+                    orderBy: { artifactId: 'asc' },
+                    take: pageSize,
+                    select: { artifactId: true, cacheEntryId: true },
+                });
+                if (existing.length) {
+                    await tx.artifactReference.createMany({
+                        data: existing.map((reference) => ({ tenantId, artifactId: reference.artifactId, ownerId: toOwnerId, cacheEntryId: reference.cacheEntryId })),
+                        skipDuplicates: true,
+                    });
+                }
+                return existing;
+            });
+            if (page.length === 0) return inherited;
+            inherited.push(...page.map((reference: { artifactId: string }) => reference.artifactId));
+            cursor = page[page.length - 1]!.artifactId;
+            if (page.length < pageSize) return inherited;
+        }
+    }
+
+    /** Release exactly one owner; other owners continue to protect the artifact. */
+    async releaseArtifact(tenantId: string, artifactId: string, ownerId: string): Promise<void> {
+        this.assertArtifactIdentity(artifactId, ownerId);
+        await this.prisma.artifactReference.deleteMany({ where: { tenantId, artifactId, ownerId } });
+    }
+
+    /**
+     * Release every artifact held by a terminal checkpoint owner and remove
+     * payloads that no remaining owner protects. Keeping both operations in
+     * one transaction prevents inherited-but-no-longer-reachable checkpoint
+     * artifacts from becoming permanent orphans.
+     */
+    async releaseArtifactOwner(tenantId: string, ownerId: string): Promise<number> {
+        this.assertArtifactIdentity('owner-release', ownerId);
+        const pageSize = 500;
+        let released = 0;
+        // Always take the first remaining page instead of holding one large
+        // interactive transaction. This keeps every transaction bounded and
+        // also makes a timed-out caller safe to retry from committed pages.
+        for (;;) {
+            const pageReleased = await this.prisma.$transaction(async (tx: any) => {
+                const references: Array<{ artifactId: string; cacheEntryId: string }> = await tx.artifactReference.findMany({
+                    where: { tenantId, ownerId },
+                    orderBy: { artifactId: 'asc' },
+                    take: pageSize,
+                    select: { artifactId: true, cacheEntryId: true },
+                });
+                if (references.length === 0) return 0;
+                const artifactIds = references.map((reference) => reference.artifactId);
+                const result = await tx.artifactReference.deleteMany({
+                    where: { tenantId, ownerId, artifactId: { in: artifactIds } },
+                });
+                const cacheEntryIds = [...new Set(references.map((reference) => reference.cacheEntryId))];
+                await tx.agentResultCache.deleteMany({
+                    where: {
+                        id: { in: cacheEntryIds },
+                        artifactReferences: { none: {} },
+                    },
+                });
+                return result.count;
+            });
+            released += pageReleased;
+            if (pageReleased === 0) return released;
+        }
+    }
+
+    /** Delete an artifact only when no durable owner still references it. */
+    async deleteArtifact(tenantId: string, artifactId: string): Promise<boolean> {
+        this.assertArtifactIdentity(artifactId);
+        const cacheKey = this.generateCacheKey({ artifactId }, []);
+        return this.prisma.$transaction(async (tx: any) => {
+            const entry = await tx.agentResultCache.findUnique({
+                where: { tenantId_agentName_cacheKey: { tenantId, agentName: 'artifact_store', cacheKey } },
+                select: { id: true },
+            });
+            if (!entry) return true;
+            const retained = await tx.artifactReference.count({ where: { cacheEntryId: entry.id } });
+            if (retained > 0) return false;
+            await tx.agentResultCache.delete({ where: { id: entry.id } });
+            return true;
+        }, { isolationLevel: 'Serializable' });
+    }
+
+    private assertArtifactIdentity(artifactId: string, ownerId?: string): void {
+        if (!artifactId || artifactId !== artifactId.trim()) throw new Error('Artifact ID is invalid');
+        if (ownerId !== undefined && (!ownerId || ownerId !== ownerId.trim() || ownerId.length > 512)) {
+            throw new Error('Artifact retention owner ID is invalid');
+        }
     }
 
     /**
@@ -237,4 +513,12 @@ export class AgentResultCache {
                 return result;
             }, {} as any);
     }
-} 
+
+    private jsonValuesEqual(left: unknown, right: unknown): boolean {
+        const normalize = (value: unknown) => {
+            const serialized = JSON.stringify(value);
+            return serialized === undefined ? undefined : this.sortObjectKeys(JSON.parse(serialized));
+        };
+        return JSON.stringify(normalize(left)) === JSON.stringify(normalize(right));
+    }
+}

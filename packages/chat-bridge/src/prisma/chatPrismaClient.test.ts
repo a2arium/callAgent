@@ -1,6 +1,6 @@
 import { jest } from '@jest/globals';
 
-jest.mock('@chat-prisma/index.js', () => {
+jest.mock('../generated/prisma/index.js', () => {
     return {
         PrismaClient: jest.fn().mockImplementation((opts: any) => ({ opts }))
     };
@@ -16,7 +16,7 @@ describe('getChatPrismaClient', () => {
 
     it('returns singleton and uses CHAT_DATABASE_URL override', async () => {
         process.env.CHAT_DATABASE_URL = 'postgres://example';
-        const { PrismaClient } = await import('@chat-prisma/index.js');
+        const { PrismaClient } = await import('../generated/prisma/index.js');
         const mockCtor = PrismaClient as unknown as jest.Mock;
 
         const mod = await import('./client.js');

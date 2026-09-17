@@ -1,0 +1,16 @@
+export default {
+    preset: 'ts-jest/presets/default-esm',
+    extensionsToTreatAsEsm: ['.ts'],
+    transform: {
+        '^.+\\.ts$': ['ts-jest', { useESM: true, diagnostics: false }],
+    },
+    moduleNameMapper: {
+        '^(\\.{1,2}/.*)\\.js$': '$1',
+        '^@a2arium/callagent-types$': '<rootDir>/../types/src/index.ts',
+        '^@a2arium/callagent-utils$': '<rootDir>/../utils/src/index.ts',
+    },
+    testEnvironment: 'node',
+    roots: ['<rootDir>/tests'],
+    moduleFileExtensions: ['ts', 'js', 'json'],
+    transformIgnorePatterns: ['node_modules/(?!(@a2arium)/)'],
+};

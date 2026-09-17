@@ -8,9 +8,11 @@
 // - Placeholders for future capabilities (world model, emotion, reward)
 import { Observation, ObservationSchema } from '../types/observation.js';
 import { PlanState, PlanStep, Plan, PlanId } from '../types/plan.js';
+import { logger } from '@a2arium/callagent-utils';
 
 
 export type ObservationBySource<Source> = Extract<Observation, { source: Source }>;
+const loopTypesLogger = logger.createLogger({ prefix: 'LoopTypes' });
 
 const findUser = (observations: Observation[]) =>
     observations.find((o): o is ObservationBySource<'user'> => o?.source === 'user');
@@ -22,6 +24,8 @@ const findInternal = (observations: Observation[]) =>
     observations.find((o): o is ObservationBySource<'internal'> => o?.source === 'internal');
 const findEnv = (observations: Observation[]) =>
     observations.find((o): o is ObservationBySource<'env'> => o?.source === 'env');
+const findConversation = (observations: Observation[]) =>
+    observations.find((o): o is ObservationBySource<'conversation'> => o?.source === 'conversation');
 
 const attachInboxAccessors = (
     inbox: Pick<ObservationInbox, 'current' | 'all'> & Partial<ObservationInbox>
@@ -35,6 +39,7 @@ const attachInboxAccessors = (
     define('child', () => findChild(inbox.current));
     define('internal', () => findInternal(inbox.current));
     define('env', () => findEnv(inbox.current));
+    define('conversation', () => findConversation(inbox.current));
     return casted;
 };
 
@@ -46,6 +51,7 @@ export type ObservationInbox = {
     child(): ObservationBySource<'child'> | undefined;
     internal(): ObservationBySource<'internal'> | undefined;
     env(): ObservationBySource<'env'> | undefined;
+    conversation(): ObservationBySource<'conversation'> | undefined;
 };
 
 export type EpisodicEvent = {
@@ -101,6 +107,26 @@ export type GoalHierarchy = {
     nodes: Record<GoalId, GoalNode>;
     roots: GoalId[];           // ordered root ids
 };
+
+/** Input accepted by `TaskContext.goals.add` / `addGoal` (subset of fields; server fills timestamps and defaults). */
+export type TaskContextGoalAddInput = {
+    id?: GoalId;
+    title: string;
+    type?: GoalType;
+    priority?: number;
+    parentId?: GoalId;
+    context?: GoalContext;
+};
+
+/** Filter for `TaskContext.goals.read` / `listGoals`. */
+export type TaskContextGoalsReadFilter = {
+    status?: GoalStatus;
+    parentId?: GoalId;
+    type?: GoalType;
+};
+
+/** Allowed patch shape for `TaskContext.goals.update` / `updateGoal`. */
+export type TaskContextGoalUpdatePatch = Partial<Omit<GoalNode, 'id' | 'createdAt'>>;
 
 export type GoalState = {
     hierarchy: GoalHierarchy;
@@ -158,6 +184,8 @@ export type MentalState<Sensory = unknown> = {
         decisions?: Record<string, import('../shared/types/index.js').DecisionEntry>;
         scratch?: unknown;       // Optional ephemeral working set (Learning-owned)
         window?: unknown;        // Optional ephemeral window (Learning-owned)
+        /** Policy-safe conversation projection (framework reducer; read-only for Policy). */
+        conversation?: import('../public-types/conversation/projection.js').ConversationProjection;
         longTerm: {
             episodic: EpisodicEvent[];
             semantic: { concepts: SemanticConcept[] };
@@ -193,8 +221,30 @@ export type ControlPendingState = {
     inputs?: Record<string, unknown>;
     children?: Record<string, { token?: string } & Record<string, unknown>>;
     tools?: Record<string, unknown>;
+    events?: Record<string, unknown>;
     groups?: Record<string, unknown>;
     controlVars?: Record<string, unknown>;
+    manifestConsents?: Record<string, IntentConsentReceipt>;
+    toolTerminals?: Record<string, unknown>;
+    childTerminals?: Record<string, unknown>;
+    inputTerminals?: Record<string, unknown>;
+};
+
+export type IntentConsentReceiptStatus = 'pending' | 'approved' | 'dispatching' | 'consumed' | 'rejected' | 'expired' | 'cancelled';
+
+export type IntentConsentReceipt = {
+    token: string;
+    taskId: string;
+    agentId: string;
+    tenantId: string;
+    intentId: string;
+    intentDigest: string;
+    requestedAt: string;
+    expiresAt: string;
+    effectIdempotencyKey: string;
+    status: IntentConsentReceiptStatus;
+    decidedAt?: string;
+    consumedAt?: string;
 };
 
 export type ControlState = {
@@ -213,8 +263,13 @@ export type EnvironmentState = {
         inputs: Record<string, unknown>;
         children: Record<string, unknown>;
         tools: Record<string, unknown>;
+        events?: Record<string, unknown>;
         groups: Record<string, unknown>;
         controlVars?: Record<string, unknown>;
+        manifestConsents?: Record<string, IntentConsentReceipt>;
+        toolTerminals?: Record<string, unknown>;
+        childTerminals?: Record<string, unknown>;
+        inputTerminals?: Record<string, unknown>;
     };
     // Optional control surface for modules needing control signals without ctx.vars
     control?: ControlState;
@@ -234,9 +289,14 @@ export const normalizeObservationInbox = (
             if (parsed.success) {
                 result.push(parsed.data);
             } else {
+                loopTypesLogger.warn('Invalid observation envelope; injecting validation.failed', {
+                    error: parsed.error.message
+                });
                 if (process.env.CALLAGENT_DEBUG_INBOX) {
-                    // eslint-disable-next-line no-console
-                    console.warn('[normalizeObservationInbox] Invalid observation envelope, injecting validation.failed:', parsed.error.message);
+                    loopTypesLogger.debug('Invalid observation envelope details', {
+                        zodError: parsed.error.format(),
+                        originalPayload: item
+                    });
                 }
                 // Inject validation.failed observation per APLRET contract so Perception/Learning can handle it
                 result.push({
@@ -273,10 +333,10 @@ export const normalizeObservationInbox = (
             tool: candidate.tool,
             child: candidate.child,
             internal: candidate.internal,
-            env: candidate.env
+            env: candidate.env,
+            conversation: (candidate as Partial<ObservationInbox>).conversation,
         };
         return attachInboxAccessors(inbox);
     }
     return attachInboxAccessors({ current: [], all: [] });
 };
-

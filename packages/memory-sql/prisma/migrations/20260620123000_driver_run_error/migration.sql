@@ -1,0 +1,2 @@
+ALTER TABLE "driver_runs"
+ADD COLUMN IF NOT EXISTS "error" JSONB;

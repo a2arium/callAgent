@@ -1,14 +1,13 @@
 import 'dotenv/config';
-import { runAgentWithStreaming } from './streamingRunner.js';
+import { runAgentWithStreamingDetailed } from './streamingRunner.js';
 import { WorkingMemorySessionStore } from '@a2arium/callagent-memory-sql';
-import { TaskEngine } from '../orchestration/taskEngine.js';
+import { bootstrapCompositionRoot } from '../runtime/bootstrapCompositionRoot.js';
 import { registerHandler } from '../orchestration/HandlerRegistry.js';
 import { PluginManager } from '../plugin/pluginManager.js';
-import { EngineLocator } from '../orchestration/EngineLocator.js';
-import { eventBus } from '../eventbus/inMemoryEventBus.js';
 import { taskChannel } from '../eventbus/taskEventEmitter.js';
 import type { A2AEvent } from '../shared/types/StreamingEvents.js';
-import { outboxPublisher } from '../eventbus/outboxPublisher.js';
+import type { BusEvent } from '../public-types/eventbus/schemas.js';
+import { busEventData } from '../eventbus/busEventHelpers.js';
 import path from 'node:path';
 import { logger } from '@a2arium/callagent-utils';
 
@@ -69,8 +68,23 @@ function parseArgs(): {
         outputFile?: string;
         tenantId?: string;
         resolveDeps?: boolean;
+        maxTurns?: number;
     };
 } {
+    const parsePositiveIntegerFlag = (raw: string | undefined, flag: string): number => {
+        if (!raw) {
+            cliLogger.error(`Missing value for ${flag}`);
+            console.error(`Missing value for ${flag}. Expected a positive integer.`);
+            process.exit(1);
+        }
+        if (!/^[1-9]\d*$/.test(raw)) {
+            cliLogger.error(`Invalid ${flag} value`, undefined, { value: raw });
+            console.error(`Invalid ${flag} value: ${raw}. Expected a positive integer.`);
+            process.exit(1);
+        }
+        return Number.parseInt(raw, 10);
+    };
+
     // Basic args (required)
     const agentFileArg = process.argv[2];
     const inputJsonArg = process.argv[3] || '{}';
@@ -78,8 +92,9 @@ function parseArgs(): {
     // Check for required agent file path
     if (!agentFileArg) {
         cliLogger.error(`Missing required argument: agent file path`);
-        console.error("Usage: yarn run-agent <path-to-agent-module.ts> [json-input-string] [--stream] [--format=json|sse] [--tenant=tenant-id] [--resolve-deps|--no-resolve-deps]");
-        console.error(`Example: yarn run-agent examples/hello-agent/AgentModule.ts '{"name": "World"}' --stream --format=json --tenant=customer-123 --resolve-deps`);
+        console.error("Usage: yarn run-agent <path-to-agent-module.js> [json-input-string] [--stream] [--format=json|sse] [--tenant=tenant-id] [--resolve-deps|--no-resolve-deps]");
+        console.error("For TypeScript sources, use `yarn dev` or run Node with a TS loader (tsx / --loader ts-node/esm).");
+        console.error(`Example: yarn run-agent examples/hello-agent/dist/AgentModule.js '{"name": "World"}' --stream --format=json --tenant=customer-123 --resolve-deps`);
         process.exit(1);
     }
 
@@ -101,7 +116,8 @@ function parseArgs(): {
         outputType: 'console' as 'json' | 'sse' | 'console',
         outputFile: undefined as string | undefined,
         tenantId: undefined as string | undefined,
-        resolveDeps: true  // Default to true for dependency resolution
+        resolveDeps: true, // Default to true for dependency resolution
+        maxTurns: undefined as number | undefined,
     };
 
     // Look for flags in remaining arguments
@@ -126,6 +142,12 @@ function parseArgs(): {
                 console.error(`Tenant ID cannot be empty`);
                 process.exit(1);
             }
+        } else if (arg.startsWith('--max-turns=')) {
+            const raw = arg.split('=')[1];
+            options.maxTurns = parsePositiveIntegerFlag(raw, '--max-turns');
+        } else if (arg === '--max-turns') {
+            options.maxTurns = parsePositiveIntegerFlag(process.argv[i + 1], '--max-turns');
+            i += 1;
         } else if (arg === '--resolve-deps') {
             options.resolveDeps = true;
         } else if (arg === '--no-resolve-deps') {
@@ -139,7 +161,8 @@ function parseArgs(): {
         format: options.outputType,
         outputFile: options.outputFile,
         tenantId: options.tenantId || 'default (from agent/env)',
-        resolveDeps: options.resolveDeps
+        resolveDeps: options.resolveDeps,
+        maxTurns: options.maxTurns,
     });
 
     return {
@@ -201,8 +224,10 @@ async function main(): Promise<void> {
         }
         const store = new WorkingMemorySessionStore();
         await store.connect();
-        const engine = new TaskEngine({ sessionStore: store });
-        try { EngineLocator.setEngine(engine as any); } catch { }
+        const { engine } = await bootstrapCompositionRoot({
+            taskEngine: { sessionStore: store },
+            registerEngineLocator: true,
+        });
         // If handlersFile provided, also load agent and its dependencies so ctx.sendTaskToAgent can find children
         if (handlersFile) {
             try {
@@ -226,25 +251,35 @@ async function main(): Promise<void> {
         // Subscribe to this session's events so we can show output and detect completion
         const channel = taskChannel(sessionId);
         let completed = false;
-        const onEvent = (ev: A2AEvent) => {
+        let unsubResume: (() => Promise<void>) | undefined;
+        const sub = await engine.eventBus.subscribe(channel, async (be: BusEvent) => {
+            const ev = busEventData<A2AEvent>(be);
+            if (!ev) {
+                return;
+            }
             if ('artifact' in ev) {
-                const text = ev.artifact.parts?.filter(p => (p as any).type === 'text')
-                    .map(p => (p as any).text)
+                const text = ev.artifact.parts
+                    ?.filter(p => (p as { type?: string }).type === 'text')
+                    .map(p => (p as { text?: string }).text)
                     .filter(Boolean)
                     .join('');
                 if (text) console.log(text);
             } else if ('status' in ev) {
                 const s = ev.status;
                 if (s.state === 'working' && s.message?.parts) {
-                    const text = s.message.parts.filter(p => (p as any).type === 'text').map(p => (p as any).text).filter(Boolean).join(' ');
+                    const text = s.message.parts
+                        .filter(p => (p as { type?: string }).type === 'text')
+                        .map(p => (p as { text?: string }).text)
+                        .filter(Boolean)
+                        .join(' ');
                     if (text) console.log(text);
                 }
                 if (ev.final && (s.state === 'completed' || s.state === 'failed' || s.state === 'canceled')) {
                     completed = true;
                 }
             }
-        };
-        eventBus.subscribe(channel, onEvent);
+        });
+        unsubResume = sub.unsubscribe;
 
         try {
             console.log(`Submitting input... sessionId=${sessionId} token=${token}`);
@@ -263,8 +298,16 @@ async function main(): Promise<void> {
         }
 
         // Cleanup
-        eventBus.unsubscribe(channel, onEvent as any);
-        try { outboxPublisher.stop(); } catch { }
+        try {
+            await unsubResume?.();
+        } catch {
+            /* noop */
+        }
+        try {
+            engine.stopOutboxPublisher();
+        } catch {
+            /* noop */
+        }
         await store.close?.();
         return;
     }
@@ -272,10 +315,11 @@ async function main(): Promise<void> {
     const { agentFilePath, input, options } = parseArgs();
 
     try {
-        await runAgentWithStreaming(agentFilePath, input, options);
+        const run = await runAgentWithStreamingDetailed(agentFilePath, input, options);
 
-        // For streaming mode, keep process alive
-        if (options.isStreaming) {
+        // Interactive streaming runs stay alive; terminal runs have already
+        // published their authoritative result and closed their resources.
+        if (options.isStreaming && !run.terminal) {
             // Don't exit immediately - the event listeners need to stay alive
             cliLogger.info('Streaming started - press Ctrl+C to exit');
         } else {

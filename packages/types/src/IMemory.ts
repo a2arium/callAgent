@@ -120,6 +120,9 @@ export type MemoryQueryOptions = {
 export type MemoryQueryResult<T> = {
     key: string;
     value: T;
+    /** Complete normalized tag set stored by metadata-aware collection backends. */
+    tags?: string[];
+    entities?: Record<string, unknown>;
 };
 
 /**
@@ -131,6 +134,36 @@ export type MemorySetOptions = {
     alignmentThreshold?: number;        // Override default threshold
     autoCreateEntities?: boolean;       // Default: true
     backend?: string;                   // Backend selection
+};
+
+/** A semantic value paired with an opaque backend-issued generation token. */
+export type SemanticVersionedValue<T> = {
+    value: T;
+    version: string;
+};
+
+/** Input for a single-key semantic compare-and-set operation. */
+export type SemanticCompareAndSetInput<T> = {
+    key: string;
+    expectedVersion: string | null;
+    value: T;
+};
+
+/** Result of semantic compare-and-set. Contention is a result, not an error. */
+export type SemanticCompareAndSetResult =
+    | { status: 'updated'; version: string }
+    | { status: 'conflict'; currentVersion: string | null };
+
+/** Options supported by semantic CAS v1. */
+export type SemanticCompareAndSetOptions = Pick<MemorySetOptions, 'tags'>;
+
+/** Optional backend-bound semantic atomic operations. */
+export type SemanticAtomicCapability = {
+    getVersioned<T>(key: string): Promise<SemanticVersionedValue<T> | null>;
+    compareAndSet<T>(
+        input: SemanticCompareAndSetInput<T>,
+        opts?: SemanticCompareAndSetOptions
+    ): Promise<SemanticCompareAndSetResult>;
 };
 
 /**
@@ -145,13 +178,18 @@ export type GetManyOptions = {
     backend?: string;
     /** Return results in random order (supported by some adapters) */
     random?: boolean;
+    /** Internal execution observer used to merge backend diagnostics into one facade event. */
+    [SEMANTIC_QUERY_EXECUTION_OBSERVER]?: SemanticQueryExecutionObserver;
 };
 
 /**
  * Query object for getMany method
  */
 export type GetManyQuery = {
+    /** Compatibility sugar for one required tag. */
     tag?: string;
+    /** Every normalized tag must be present. */
+    tags?: string[];
     filters?: MemoryFilter[];
     limit?: number;
     orderBy?: {
@@ -194,13 +232,34 @@ export type SemanticReadFilter = {
 };
 
 /**
+ * A bounded, deterministic semantic-memory page query.
+ *
+ * Exact-id and random reads deliberately remain outside the pagination
+ * contract because neither describes a stable collection traversal.
+ */
+export type SemanticReadPageFilter =
+    Omit<SemanticReadFilter, 'id' | 'random' | 'limit' | 'orderBy'> & {
+        limit: number;
+        cursor?: string;
+        orderBy?: {
+            path: 'createdAt' | 'updatedAt';
+            direction: 'asc' | 'desc';
+        };
+    };
+
+/**
  * Returned high-level wrapper item from semantic memory
  */
-export type SemanticItem = {
+export type SemanticItem<T = unknown> = {
     id: string;
-    value: unknown;
+    value: T;
     tags?: string[];
     entities?: Record<string, unknown>;
+};
+
+export type SemanticReadPage<T = unknown> = {
+    items: SemanticItem<T>[];
+    nextCursor?: string;
 };
 
 /**
@@ -208,14 +267,87 @@ export type SemanticItem = {
  */
 export type SemanticRemoveFilter = {
     tag?: string;
-    filters?: any[];
+    tags?: string[];
+    filters?: MemoryFilter[];
+    backend?: string;
     limit?: number;
+    orderBy?: { path: string; direction: 'asc' | 'desc' };
+};
+
+export type SemanticRemoveResult = {
+    removedCount: number;
 };
 
 /**
  * Predicate function based memory removal definition
  */
 export type SemanticPredicateFilter = (item: SemanticItem) => boolean;
+
+export type SemanticTagQueryCapability = {
+    allOf: true;
+    returnsStoredTags: true;
+};
+
+export type SemanticPredicateRemovalCapability = {
+    allOfTags: true;
+    predicateRechecked: true;
+    returnsCount: true;
+    /** Whether strict removal can atomically recheck entity-alignment predicates. */
+    entityFilters?: boolean;
+};
+
+export type SemanticMemoryCapabilities = {
+    /** Bounded implementation kind for telemetry; never a user-controlled registration name. */
+    backendKind?: 'sql' | 'mlo' | 'custom';
+    tagQuery?: SemanticTagQueryCapability;
+    predicateRemoval?: SemanticPredicateRemovalCapability;
+};
+
+export type SemanticQueryExecutionStats = {
+    databaseDurationMs?: number;
+    alignmentBatchQueries?: number;
+    residualFilter?: boolean;
+    residualPages?: number;
+    residualPageSize?: number;
+    scannedRows?: number;
+};
+
+export type SemanticQueryExecutionObserver = (stats: SemanticQueryExecutionStats) => void;
+
+export const SEMANTIC_QUERY_EXECUTION_OBSERVER: unique symbol = Symbol.for(
+    '@a2arium/callagent/semantic-query-execution-observer'
+) as any;
+
+export type SemanticQueryTelemetry = SemanticQueryExecutionStats & {
+    operation: 'read' | 'remove';
+    backendKind: 'sql' | 'mlo' | 'custom';
+    queryMode: 'id' | 'pattern' | 'structured';
+    requiredTagCount: number;
+    hasFilters: boolean;
+    hasEntityFilters: boolean;
+    random: boolean;
+    requestedLimit: number;
+    resultCount: number;
+    durationMs: number;
+    outcome: 'ok' | 'error';
+    errorCode?: string;
+    compatibilityPath?: 'legacy-object-remove' | 'predicate-remove';
+    paginated?: boolean;
+    cursorProvided?: boolean;
+    hasNextPage?: boolean;
+};
+
+/** Optional native pagination implemented by a semantic-memory backend. */
+export type SemanticPaginationCapability = {
+    readPage<T = unknown>(
+        filter: Omit<SemanticReadPageFilter, 'backend'>,
+        options: {
+            /** Registry name, used to bind opaque cursors to backend selection. */
+            backendName: string;
+            [SEMANTIC_QUERY_EXECUTION_OBSERVER]?: SemanticQueryExecutionObserver;
+        },
+    ): Promise<SemanticReadPage<T>>;
+};
 
 /**
  * Interface for a semantic memory backend, supporting key-value storage and advanced queries.
@@ -230,6 +362,15 @@ export type SemanticMemoryBackend = {
     set<T>(key: string, value: T, opts?: MemorySetOptions): Promise<void>;
     delete(key: string, opts?: { backend?: string }): Promise<void>;
     remove(input: GetManyInput, options?: GetManyOptions): Promise<number>;
+
+    /** Optional real atomic operations. Registries must never emulate these. */
+    atomic?: SemanticAtomicCapability;
+
+    /** Optional native keyset pagination. Registries must never emulate it. */
+    pagination?: SemanticPaginationCapability;
+
+    /** Optional truthful declarations for structured tag queries and removals. */
+    capabilities?: SemanticMemoryCapabilities;
 
 
     // ── Advanced Operations ──
@@ -294,11 +435,19 @@ export type MemoryRegistry<T> = {
  */
 export type IMemory = {
     semantic: MemoryRegistry<SemanticMemoryBackend> & {
+        /** Optional capability discovery for runtimes created before semantic CAS existed. */
+        getAtomic?(opts?: { backend?: string }): SemanticAtomicCapability | undefined;
         add(item: SemanticAddInput): Promise<void>;
-        readItems(filter?: SemanticReadFilter): Promise<SemanticItem[]>;
-        removeItem(idOrFilter: string | SemanticRemoveFilter | SemanticPredicateFilter): Promise<void>;
+        readItems<T = unknown>(filter?: SemanticReadFilter): Promise<SemanticItem<T>[]>;
+        readItemsPage?<T = unknown>(filter: SemanticReadPageFilter): Promise<SemanticReadPage<T>>;
+        removeItem(id: string, options?: { backend?: string }): Promise<void>;
+        /** @deprecated Use removeItems(filter). */
+        removeItem(filter: SemanticRemoveFilter): Promise<void>;
+        /** @deprecated Arbitrary JavaScript predicates cannot be rechecked atomically. */
+        removeItem(predicate: SemanticPredicateFilter): Promise<void>;
+        removeItems(filter: SemanticRemoveFilter): Promise<SemanticRemoveResult>;
     };
     episodic: MemoryRegistry<EpisodicMemoryBackend>;
     embed: MemoryRegistry<EmbedMemoryBackend>;
     working?: MemoryRegistry<import('./workingMemory.js').WorkingMemoryBackend>;
-}; 
+};

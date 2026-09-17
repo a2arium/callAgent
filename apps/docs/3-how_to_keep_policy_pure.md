@@ -61,6 +61,28 @@ If yes, it belongs in:
 
 not in Policy and not in `MentalState`
 
+Manifest consent is one such runtime control concern. Policy proposes the domain intent normally. The runtime evaluates the post-Shield intent, keeps approval receipts in durable pending state, and emits a normalized framework observation after approval, rejection, or expiry. Do not read the manifest, pending receipt, or raw approval input in Policy or Execution. See [manifest consent](./19-how_to_use_manifest_consent.md).
+
+## Policy and selectors
+
+Policy should stay **sync and `MentalState`-only**, but it should not **deep-read** arbitrary nested paths everywhere. The standard pattern is a **`selectors.ts`** module that exposes a compact **decision-ready view** (e.g. `readPolicyView(m)`), and Policy reads only that view before emitting a **domain-named** intent. That keeps Policy easy to scan and aligns with [APLRET contracts](./0-aplret_contracts.md) and [Agent repository layout](./14-agent_repository_layout_for_aplret.md).
+
+```ts
+// selectors.ts — example (MentalState is your agent’s cognition type from the framework)
+type PolicyView = { hasInvoice: boolean; invoiceId?: string };
+
+export function readPolicyView(m: MentalState): PolicyView {
+  return { hasInvoice: !!m.worldModel?.latestInvoiceId, invoiceId: m.worldModel?.latestInvoiceId };
+}
+
+// policy.ts
+policy: (m) => {
+  const v = readPolicyView(m);
+  if (!v.hasInvoice) return { kind: 'fetch_invoice' };
+  return { kind: 'submit', invoiceId: v.invoiceId! };
+},
+```
+
 ## Rewrite patterns
 
 ### Case 1: “Policy wants config”
@@ -192,6 +214,8 @@ policy: (m) => {
 }
 ```
 
+Policy MAY call `selectReadyPlanSteps` / `validatePlanGraph` — they are pure functions of `M.plans`, not `ctx` / `env` / durable memory. DAG Policy then emits one `execute_step`. Do not turn that into a scheduler or emit two intents. Execution will run a blocked-but-named pending step; that is a Policy bug, not an Execution gate.
+
 ### Case 6: “Policy wants to branch on current Stage”
 
 #### Bad
@@ -252,3 +276,18 @@ If any answer is no, the change is probably in the wrong module.
 ## Fast review comment you can leave on a PR
 
 > This change crosses module boundaries. Please show the full turn story: Execution result, Transition outcome, inbox observation, Perception validation, Learning write, Policy read, and tests. Right now the change looks partial and may lose data between turns.
+
+## Conversation APIs
+
+Treat `ctx.conversation.*` exactly like tools/LLMs/child dispatch: Execution-only effects.
+
+- Allowed in Execution: `startThread`, `send`, `close`
+- Allowed in Execution (topics): `createTopic`, `invite`, `join`, `decline`, `leave`, `post`, `close`
+- Forbidden in Policy: direct `ctx.conversation` calls
+- Policy emits intent; Execution performs the conversation side effect; results re-enter through inbox observations
+
+When Policy reads projected topic membership, key by `memberId` (seat identity) rather than assuming `agentId` uniqueness inside a topic.
+
+When Policy reasons about **invites**, read the normalized projection fields (e.g. top-level **`invitesInbox`** and per-topic `pendingInvites`) produced by Learning from `topic.invite.*` observations — not raw inbox routing details or transport retries.
+
+For **threads (Phase 3)**, Policy may narrow on **`M.memory.conversation.threads[id].status`** (`'open' | 'closed' | 'archived'`) and on **`closedReason`** (e.g. **`'ttl'`** vs operator-initiated) using the policy-safe projection — still **no** `ctx.conversation.*` calls in Policy.

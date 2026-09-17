@@ -1,5 +1,8 @@
 # Loop Modules: Contracts & Rules (A-P-L-R-E-T)
 
+> Status: design draft.
+> API shapes here may evolve; verify stable contracts in `apps/docs/0-aplret_contracts.md`.
+
 This page defines the **contracts, purity rules, and data responsibilities** for each loop module:
 
 **Attention → Perception → Learning → Policy → Shield → Execution → Transition**
@@ -144,7 +147,7 @@ type Modules<
                 | { action: 'veto'; reason: string }
                 | { action: 'defer'; askUser: string };
   execution:  (intent: ProposedAction, ctx: TaskContext, m: MentalState<Sensory>) => Promise<{ action: ExecutableAction; result: ExecResult<ExecData, ExecError> }>;
-  transition: (env: EnvironmentState<ObservationPayload>, exec: { action: ExecutableAction; result: ExecResult<ExecData, ExecError> }, m: MentalState<Sensory>, llm?: PureLLMPort) => TransitionOut<ObservationPayload>;
+  transition: (env: EnvironmentState<ObservationPayload>, exec: { action: ExecutableAction; result: ExecResult<ExecData, ExecError> }, m: MentalState<Sensory>, mem: MemoryReader) => TransitionOut<ObservationPayload>;
 
   // Optional reward hooks
   extrinsicReward?: (m: MentalState<Sensory>, a: ProposedAction, exec: { action: ExecutableAction; result: ExecResult<ExecData, ExecError> }, outcome: TransitionOut<ObservationPayload>, llm?: PureLLMPort) => number;

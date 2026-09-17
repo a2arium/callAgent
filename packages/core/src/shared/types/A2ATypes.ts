@@ -1,6 +1,8 @@
 import type { TaskInput, TaskStatus, Artifact } from './index.js'; // From core index
-import type { ThoughtEntry, DecisionEntry } from '@a2arium/callagent-memory-engine'; // From memory-engine
+import type { ThoughtEntry, DecisionEntry } from '@a2arium/callagent-memory-engine';
+import type { ThreadRef } from '../../public-types/conversation/types.js'; // From memory-engine
 import type { SerializedAgentContext } from '@a2arium/callagent-memory-engine'; // Serialization types from memory-engine
+import type { ILLMCaller } from './LLMTypes.js';
 
 // Re-export serialization types for convenience
 export type { SerializedAgentContext };
@@ -11,27 +13,35 @@ export type { SerializedWorkingMemory, SerializedMemoryContext, RecalledMemoryIt
  * The full TaskContext will be defined in index.ts and will implement/extend this.
  */
 export type MinimalSourceTaskContext = {
-    task: { id: string;[key: string]: any };
+    task: { id: string; [key: string]: unknown };
     tenantId: string;
     getGoal?: () => Promise<string | null>;
     getThoughts?: () => Promise<ThoughtEntry[]>;
     // Add other methods IA2AService's sendTaskToAgent might directly need from sourceCtx *before* targetCtx creation
     // For example, for memory operations *during* serialization.
-    recall?: (query: string, options?: any) => Promise<any[]>;
+    recall?: (query: string, options?: Record<string, unknown>) => Promise<unknown[]>;
     memory?: {
-        semantic?: any; // Placeholder for semantic adapter type if needed by serializer
+        semantic?: unknown; // Placeholder for semantic adapter type if needed by serializer
         mlo?: {
             getAllDecisions?: (agentId?: string) => Promise<Record<string, DecisionEntry>>;
-            [key: string]: any;
+            [key: string]: unknown;
         };
-        [key: string]: any;
+        [key: string]: unknown;
     };
 
     // Add agentId to allow the serializer to get the source agent's ID
     agentId: string;
+
+    /** Present when the caller participates in the telemetry tree (e.g. loop turn or subagent). */
+    telemetry?: {
+        nodeId?: string;
+        traceId?: string;
+    };
     // Add llm and tools for sharing with target context
-    llm?: any;
-    tools?: any;
+    llm?: ILLMCaller;
+    tools?: {
+        invoke(name: string, args: Record<string, unknown>): Promise<unknown>;
+    };
 };
 
 /**
@@ -69,6 +79,15 @@ export type A2ACallOptions = {
     setStage?: string;
     /** Explicitly provide a task ID for the child agent (for persistence/resumption) */
     childTaskId?: string;
+    /**
+     * Reuse an existing thread for this dispatch (multi-turn `sendTaskToAgent`).
+     * Thread-only; use `ctx.conversation.startThread` first to obtain a `ThreadRef`.
+     */
+    conversation?: ThreadRef;
+    /** Optional plan-step correlation stamps written onto the pending child record. */
+    planId?: string;
+    stepId?: string;
+    advanceCursor?: boolean;
 };
 
 /**

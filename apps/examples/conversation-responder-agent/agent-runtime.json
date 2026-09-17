@@ -1,0 +1,14 @@
+{
+  "name": "conversation-responder-agent",
+  "version": "0.1.0",
+  "runMode": "loop",
+  "budgets": {
+    "maxTurns": 50
+  },
+  "observability": {
+    "turnTrace": {
+      "enabled": true,
+      "level": "summary"
+    }
+  }
+}

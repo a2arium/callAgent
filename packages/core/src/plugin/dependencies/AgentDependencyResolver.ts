@@ -51,8 +51,8 @@ export class AgentDependencyResolver {
         const warnings: string[] = [];
 
         try {
-            // Build the complete dependency graph
-            await this.buildDependencyGraph(rootAgent, visited, dependencyGraph, warnings, contextPath);
+            // Build the complete dependency graph (contextPath applies only to the root agent's manifest discovery)
+            await this.buildDependencyGraph(rootAgent, visited, dependencyGraph, warnings, contextPath, rootAgent);
 
             // Check for circular dependencies
             const circularDependency = this.detectCircularDependencies(dependencyGraph);
@@ -241,7 +241,8 @@ export class AgentDependencyResolver {
         visited: Set<string>,
         graph: Map<string, string[]>,
         warnings: string[],
-        contextPath?: string
+        contextPath: string | undefined,
+        rootAgentName: string
     ): Promise<void> {
         if (visited.has(agentName)) {
             return; // Already processed
@@ -251,7 +252,8 @@ export class AgentDependencyResolver {
         resolverLogger.debug('Processing agent dependencies', { agentName });
 
         try {
-            const manifest = await this.loadManifest(agentName, contextPath);
+            const manifestDiscoveryPath = agentName === rootAgentName ? contextPath : undefined;
+            const manifest = await this.loadManifest(agentName, manifestDiscoveryPath);
             const dependencies = manifest.dependencies?.agents || [];
 
             // Add agent to graph with its dependencies
@@ -268,7 +270,10 @@ export class AgentDependencyResolver {
                 }
 
                 // Validate dependency exists
-                const dependencyStructure = await SmartAgentDiscoveryService.validateAgentStructure(dependency, contextPath);
+                const dependencyStructure = await SmartAgentDiscoveryService.validateAgentStructure(
+                    dependency,
+                    dependency === rootAgentName ? contextPath : undefined
+                );
                 if (!dependencyStructure.isValid) {
                     throw new DependencyResolutionError(
                         `Dependency '${dependency}' not found for agent '${agentName}'`,
@@ -281,7 +286,7 @@ export class AgentDependencyResolver {
                 }
 
                 // Recursively resolve dependencies
-                await this.buildDependencyGraph(dependency, visited, graph, warnings, contextPath);
+                await this.buildDependencyGraph(dependency, visited, graph, warnings, contextPath, rootAgentName);
             }
 
             if (dependencies.length > 0) {

@@ -1,6 +1,5 @@
 
-import * as uuid from 'uuid';
-const uuidv4 = uuid.v4;
+import { v7 as uuidv7 } from 'uuid';
 
 export type NodeType = 'agent' | 'turn' | 'module' | 'tool' | 'llm' | 'workflow' | 'child';
 export type NodeStatus = 'pending' | 'active' | 'success' | 'failure';
@@ -39,7 +38,7 @@ export abstract class TelemetryNode {
     public readonly providerData: Record<string, unknown> = {};
 
     constructor(type: NodeType, parentId?: string, id?: string, traceId?: string) {
-        this.id = id || uuidv4();
+        this.id = id || uuidv7();
         this.parentId = parentId;
         this.traceId = traceId;
         this.type = type;

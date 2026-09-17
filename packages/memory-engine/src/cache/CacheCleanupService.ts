@@ -24,7 +24,8 @@ export class CacheCleanupService {
             const now = new Date();
             const result = await this.prisma.agentResultCache.deleteMany({
                 where: {
-                    expiresAt: { lt: now }
+                    expiresAt: { lt: now },
+                    artifactReferences: { none: {} },
                 }
             });
 
@@ -42,6 +43,42 @@ export class CacheCleanupService {
     }
 
     /**
+     * Delete one bounded, tenant-scoped batch of expired entries.
+     *
+     * This is deliberately strict: callers that provide durable scheduling need
+     * database failures to fail the job, rather than silently looking like an
+     * empty cleanup pass. Artifacts live in this cache today, so their existing
+     * TTL is handled by exactly the same path.
+     */
+    async cleanupExpired(params: {
+        tenantId: string;
+        batchSize: number;
+        now?: Date;
+    }): Promise<{ deleted: number; hasMore: boolean }> {
+        const now = params.now ?? new Date();
+        const rows = await this.prisma.agentResultCache.findMany({
+            where: { tenantId: params.tenantId, expiresAt: { lt: now }, artifactReferences: { none: {} } },
+            select: { id: true },
+            orderBy: { expiresAt: 'asc' },
+            take: params.batchSize,
+        });
+        if (rows.length === 0) return { deleted: 0, hasMore: false };
+        const result = await this.prisma.agentResultCache.deleteMany({
+            where: { tenantId: params.tenantId, id: { in: rows.map((row: { id: string }) => row.id) } },
+        });
+        return { deleted: result.count, hasMore: rows.length === params.batchSize };
+    }
+
+    /** Strict tenant-scoped counts for operator and maintenance status. */
+    async getTenantStats(tenantId: string, now = new Date()): Promise<{ totalEntries: number; expiredEntries: number }> {
+        const [totalEntries, expiredEntries] = await Promise.all([
+            this.prisma.agentResultCache.count({ where: { tenantId } }),
+            this.prisma.agentResultCache.count({ where: { tenantId, expiresAt: { lt: now }, artifactReferences: { none: {} } } }),
+        ]);
+        return { totalEntries, expiredEntries };
+    }
+
+    /**
      * Get cache statistics
      */
     async getStats(): Promise<CacheStats> {
@@ -54,7 +91,7 @@ export class CacheCleanupService {
 
                 // Expired entries count
                 this.prisma.agentResultCache.count({
-                    where: { expiresAt: { lt: now } }
+                    where: { expiresAt: { lt: now }, artifactReferences: { none: {} } }
                 }),
 
                 // Oldest entry
@@ -195,4 +232,4 @@ export interface CacheStats {
     oldestEntry: Date | null;
     newestEntry: Date | null;
     agentBreakdown: Record<string, number>;
-} 
+}

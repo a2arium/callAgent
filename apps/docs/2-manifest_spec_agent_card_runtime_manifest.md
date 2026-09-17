@@ -307,6 +307,10 @@ type AgentRuntimeManifestV1 = {
     maxTurns?: number;
     /** Maximum total latency budget for a run. */
     latencyMs?: number;
+    /** Maximum loop iterations per durable provider segment; reaching it pauses rather than fails. */
+    segmentMaxTurns?: number;
+    /** Maximum elapsed time per provider segment, checked between turns; reaching it pauses rather than fails. */
+    segmentLatencyMs?: number;
     /** Optional cap on concurrent effects per turn. */
     maxConcurrentEffects?: number;
   };
@@ -314,6 +318,8 @@ type AgentRuntimeManifestV1 = {
   /** Human-in-the-loop policy. */
   hitl?: {
     level?: 'advise' | 'consent' | 'guardrails';
+    /** Defaults to 86_400_000 (24 hours). */
+    consentTtlMs?: number;
     requireConsentFor?: {
       intents?: string[];
       tools?: string[];
@@ -358,12 +364,64 @@ type AgentRuntimeManifestV1 = {
       level?: 'debug' | 'info' | 'warn' | 'error';
     };
   };
+
+  /** Optional communication runtime behavior. */
+  communication?: {
+    /**
+     * When true, the loop attempts `ctx.conversation.join(...)` for
+     * `topic.invite.received` observations before policy evaluation.
+     * Default: false.
+     */
+    autoJoinInvitedTopics?: boolean;
+    /**
+     * Idle thread TTL in milliseconds. Default 3600000 (1 hour). Use `null` to disable TTL for this runtime.
+     */
+    threadTtlMs?: number | null;
+    /**
+     * While a `runLoop` is active, invoke the topic lifecycle sweeper (`triggerTopicLifecycleSweep`) for this
+     * tenant when at least `intervalMs` of wall time has elapsed since the last sweep (checked at the start
+     * of each loop turn). The first check may run immediately. Requires a framework `TaskEngine` on
+     * `EngineLocator` (e.g. CLI / streaming runner). Omit to rely on manual sweeps only. See migration
+     * `5.4a-conversation-phase-4a-…`.
+     */
+    topicSweeper?: {
+      intervalMs: number;
+      batchSize?: number;
+      autoArchiveAfterMs: number;
+    };
+  };
+
+  /**
+   * Thread sweeper (idle TTL + optional auto-archive of closed threads). Defaults are runtime-defined; see migration 5.3.
+   */
+  conversation?: {
+    threadSweeper?: {
+      intervalMs?: number;
+      batchSize?: number;
+      /** Milliseconds after `closed_at` before sweeper may archive a closed thread; `null` disables auto-archive. */
+      autoArchiveAfterMs?: number | null;
+    };
+  };
 };
 ```
 
 ### Runtime semantics
 
 The exact behavioral meaning of runtime fields such as `budgets`, `hitl`, `cache`, and `safety` MUST be defined by CallAgent runtime documentation.
+
+`segmentMaxTurns` and `segmentLatencyMs` are non-terminal provider boundaries. When
+either is configured, an agent may return `{ kind: 'continue', observations: [] }`
+after committing domain progress; CallAgent persists the latest snapshot and pauses
+the provider segment at the configured boundary. Durable runtimes automatically
+continue under the same task generation and logical turn with a new fenced claim;
+the root deadline is unchanged. Without a segment boundary,
+observation-free `continue` remains invalid to prevent an unbounded busy loop.
+
+### Manifest consent enforcement
+
+`hitl.requireConsentFor.intents` and `.tools` are runtime-enforced after Shield and before Execution. Values are case-sensitive, trimmed, non-empty, and unique. Generic wrappers (`prompt_user`, `answer_with_llm`, `call_tool`, and `delegate_to_child`) are not valid domain intent identifiers; tools are declared under `.tools`. An `internal` intent is declared by its `intent` value, for example `activate_bundle`; other declarable built-ins use their `kind`.
+
+Shield `veto` and `defer` win. A Shield `transform` is matched using the transformed intent. Consent expires after `consentTtlMs` (24 hours by default), is bound to the exact canonical intent, and requires structured input `{ decision: 'approve' | 'reject' }`. See [manifest consent](./19-how_to_use_manifest_consent.md).
 
 This manifest spec defines the configuration surface, not every execution detail.
 

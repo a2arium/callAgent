@@ -4,6 +4,7 @@
         "outDir": "dist",
         "rootDir": "src",
         "composite": true,
+        "isolatedModules": true,
         "module": "nodenext",
         "moduleResolution": "nodenext"
     },

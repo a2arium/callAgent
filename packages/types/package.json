@@ -9,8 +9,27 @@
   "exports": {
     ".": {
       "import": "./dist/index.js",
-      "require": "./dist/index.js",
       "types": "./dist/index.d.ts"
+    },
+    "./working-memory-version-conflict": {
+      "import": "./dist/working-memory-version-conflict.js",
+      "types": "./dist/working-memory-version-conflict.d.ts"
+    },
+    "./task-lifecycle-terminal": {
+      "import": "./dist/task-lifecycle-terminal.js",
+      "types": "./dist/task-lifecycle-terminal.d.ts"
+    },
+    "./task-turn-superseded": {
+      "import": "./dist/task-turn-superseded.js",
+      "types": "./dist/task-turn-superseded.d.ts"
+    },
+    "./hatchet-worker-lifetime-lost": {
+      "import": "./dist/hatchet-worker-lifetime-lost.js",
+      "types": "./dist/hatchet-worker-lifetime-lost.d.ts"
+    },
+    "./task-turn-coordinator-state": {
+      "import": "./dist/task-turn-coordinator-state.js",
+      "types": "./dist/task-turn-coordinator-state.d.ts"
     }
   },
   "scripts": {
@@ -27,6 +46,19 @@
   },
   "description": "Shared types and error classes for the CallAgent framework.",
   "license": "MIT",
+  "author": "A2arium <a2arium@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/a2arium/callAgent.git",
+    "directory": "packages/types"
+  },
+  "bugs": {
+    "url": "https://github.com/a2arium/callAgent/issues"
+  },
+  "homepage": "https://github.com/a2arium/callAgent/tree/main/packages/types#readme",
+  "engines": {
+    "node": ">=20"
+  },
   "keywords": [
     "types",
     "errors",
@@ -34,7 +66,7 @@
   ],
   "type": "module",
   "dependencies": {
-    "zod": "^3.24.2"
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "typescript": "^5.8.3"

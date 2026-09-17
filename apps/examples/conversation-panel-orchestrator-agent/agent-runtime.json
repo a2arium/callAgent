@@ -1,0 +1,17 @@
+{
+  "name": "conversation-panel-orchestrator-agent",
+  "version": "0.1.0",
+  "runMode": "loop",
+  "dependencies": {
+    "agents": ["conversation-panel-persona-agent"]
+  },
+  "budgets": {
+    "maxTurns": 80
+  },
+  "observability": {
+    "turnTrace": {
+      "enabled": true,
+      "level": "summary"
+    }
+  }
+}

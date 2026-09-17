@@ -6,7 +6,7 @@ import { StreamTransport } from './StreamTransport.js';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { loadConfig, type MinimalConfig } from '../config/index.js';
 import { PluginManager } from '../plugin/pluginManager.js';
-import type { TaskContext, TaskInput, MessagePart, Artifact as ArtifactHandle } from '../shared/types/index.js';
+import type { TaskContext, TaskInput, MessagePart } from '../shared/types/index.js';
 import type { TaskStatus, Artifact as StreamArtifact } from '../shared/types/StreamingEvents.js';
 import type { AgentPlugin } from '../plugin/types.js';
 import { logger, withLoggingContext, type LoggerConfig } from '@a2arium/callagent-utils';
@@ -14,13 +14,19 @@ import { AgentError, InvariantError, ModuleExecutionError, TaskExecutionError } 
 import type { InvariantErrorCode, InvariantErrorContext, InvariantErrorDetail } from '../types/invariantError.js';
 import { throwInvariantError } from '../utils/invariantError.js';
 import type { UniversalChatResponse, UniversalStreamResponse } from 'callllm';
-import { eventBus } from '../eventbus/inMemoryEventBus.js';
+import { createInMemoryEventBus } from '../eventbus/inMemoryEventBus.js';
+import { createBusEvent, busEventData } from '../eventbus/busEventHelpers.js';
+import type { BusEvent } from '../public-types/eventbus/schemas.js';
+import type { IEventBus } from '../public-types/eventbus/types.js';
 import { taskChannel } from '../eventbus/taskEventEmitter.js';
-import { outboxPublisher } from '../eventbus/outboxPublisher.js';
 import { extendContextWithStreaming } from '../context/StreamingContext.js';
+import * as uuid from 'uuid';
+const uuidv7 = uuid.v7;
 import type { A2AEvent, TaskArtifactUpdateEvent, TaskStatusUpdateEvent } from '../shared/types/StreamingEvents.js';
 import fs from 'node:fs';
 import { createLLMForTask } from '../llm/LLMFactory.js';
+import type { LLMMessage } from '../shared/types/LLMTypes.js';
+import type { LLMCallOptions, LLMSettings } from '../types/llmContracts.js';
 import { TaskEngine, type TaskEntity } from '../orchestration/taskEngine.js';
 import { EngineLocator } from '../orchestration/EngineLocator.js';
 import { WorkingMemorySessionStore } from '@a2arium/callagent-memory-sql';
@@ -30,17 +36,26 @@ import { extendContextWithMemory } from '@a2arium/callagent-memory-engine';
 import { resolveTenantId } from '../plugin/tenantResolver.js';
 import { globalA2AService } from '../orchestration/A2AService.js';
 import { AgentResultCache } from '@a2arium/callagent-memory-engine';
-import { ArtifactImpl } from '@a2arium/callagent-memory-engine';
 import { PrismaClient } from '../generated/prisma-client/index.js';
 import { PrismaPg } from '@prisma/adapter-pg';
 import pg from 'pg';
 import { loadAgentIndexIfPresent } from '../plugin/AgentIndexLoader.js';
+import { resolveActiveRunTimeout, resolveTerminalDrainTimeout } from './backgroundTaskTimeout.js';
+import { readDurableTaskTerminal } from '../orchestration/TaskLifecycle.js';
+import { createTerminalDeliveryGate } from './terminalDeliveryGate.js';
+import { hasHatchetWorkerLifetimeLostCause } from '@a2arium/callagent-types/hatchet-worker-lifetime-lost';
+import {
+    ArtifactStorageUnavailableError,
+    createArtifactFactory,
+} from '../context/artifactFactory.js';
 
 // Create base runner logger
 const runnerLogger = logger.createLogger({ prefix: 'StreamingRunner' });
 
-// Detect if running in dev mode with ts-node
-const isDevMode = process.argv[0].includes('ts-node') || process.argv[1].includes('ts-node');
+// Detect if running in dev mode with ts-node. Library imports may not have argv[1].
+const argv0 = process.argv[0] ?? '';
+const argv1 = process.argv[1] ?? '';
+const isDevMode = argv0.includes('ts-node') || argv1.includes('ts-node');
 
 type StreamingOptions = {
     isStreaming: boolean;
@@ -49,6 +64,11 @@ type StreamingOptions = {
     tenantId?: string; // CLI-specified tenant override
     resolveDeps?: boolean; // Whether to resolve dependencies (default: true)
     maxTurns?: number; // Override the default maxTurns
+};
+
+export type StreamingRunResult = {
+    terminal: boolean;
+    state?: TaskStatus['state'];
 };
 
 /**
@@ -69,11 +89,11 @@ type PartialTaskContext = Omit<TaskContext,
  * @param options - Streaming and output options
  * @throws {TaskExecutionError} If agent execution fails
  */
-export async function runAgentWithStreaming(
+export async function runAgentWithStreamingDetailed(
     agentFilePath: string,
     input: TaskInput,
     options: StreamingOptions
-): Promise<void> {
+): Promise<StreamingRunResult> {
     await loadAgentIndexIfPresent();
 
     const config: MinimalConfig = loadConfig();
@@ -100,6 +120,7 @@ export async function runAgentWithStreaming(
 
     // --- Create Task Context ---
     const taskId = `local-task-${Date.now()}`;
+    const runnerEventBus = createInMemoryEventBus();
 
     // Initialize Services
     const runnerState = new RunnerStateService();
@@ -129,27 +150,47 @@ export async function runAgentWithStreaming(
     // Determine log method for debug logs (debug -> stdout, warn -> stderr)
     const logDebugMethod = (options.outputType === 'json' || options.outputType === 'sse') ? runnerLogger.warn : runnerLogger.debug;
 
-    eventBus.subscribe(channel, (event: A2AEvent) => {
-        // If not streaming, we might only want progress updates?
-        // Original logic:
-        // isStreaming -> handleStatusEvent & handleArtifactEvent
-        // !isStreaming -> setupProgressListeners (which only logs status if it's input-required or debug-like)
-
+    const terminalGate = createTerminalDeliveryGate((status) => transport.handleStatus(status, true));
+    const deliverTerminal = (status: TaskStatus, deliveryKey: string): boolean =>
+        terminalGate({ status, deliveryKey });
+    const mainSubscription = await runnerEventBus.subscribe(channel, async (be: BusEvent) => {
+        const event = busEventData<A2AEvent>(be);
+        if (!event) {
+            return;
+        }
         if (options.isStreaming) {
             if ('status' in event) {
-                transport.handleStatus(event.status, !!event.final);
+                const isTerminal = event.final === true && (
+                    event.status.state === 'completed' ||
+                    event.status.state === 'failed' ||
+                    event.status.state === 'canceled'
+                );
+                const deliveryKey = (event as unknown as { deliveryKey?: string }).deliveryKey;
+                if (isTerminal) {
+                    if (deliveryKey || runMode === 'legacy') {
+                        deliverTerminal(event.status, deliveryKey ?? `${taskId}:legacy:${event.status.state}`);
+                    }
+                } else {
+                    transport.handleStatus(event.status, false);
+                }
             } else if ('artifact' in event) {
                 transport.handleArtifact(event.artifact);
             }
         } else {
-            // Non-streaming logic (progress only)
-            if ('status' in event) {
+            if ('status' in event && 'final' in event) {
                 const s = event.status;
-                // Filter what we show in non-streaming mode to match legacy setupProgressListeners
-                if (s.state === 'input-required' || (s.state as any) === 'waiting_input') {
-                    transport.handleStatus(s, false); // Input required is important
+                const isFinal = (event as { final?: boolean }).final === true;
+                if (
+                    isFinal &&
+                    (s.state === 'completed' || s.state === 'failed' || s.state === 'canceled')
+                ) {
+                    const deliveryKey = (event as unknown as { deliveryKey?: string }).deliveryKey;
+                    if (deliveryKey || runMode === 'legacy') {
+                        deliverTerminal(s, deliveryKey ?? `${taskId}:legacy:${s.state}`);
+                    }
+                } else if (s.state === 'input-required' || (s.state as unknown) === 'waiting_input') {
+                    transport.handleStatus(s, false);
                 } else if (s.state === 'working') {
-                    // Show progress dots/messages? Legacy setupProgressListeners showed them.
                     transport.handleStatus(s, false);
                 }
             }
@@ -190,7 +231,7 @@ export async function runAgentWithStreaming(
             return agentResultCache;
         } catch (error) {
             agentLogger.error('Failed to initialize AgentResultCache', error);
-            throw new Error('Artifacts require a database connection. Please ensure Prisma is configured.');
+            throw new ArtifactStorageUnavailableError();
         }
     };
 
@@ -207,23 +248,20 @@ export async function runAgentWithStreaming(
     }
 
     // Create basic task context with resolved tenant information (excluding working memory methods)
-    const artifactsFactory: TaskContext['artifacts'] = {
-        create: <T>(val?: T, options?: { mimeType?: string; preview?: string }): ArtifactHandle<T> => {
-            const cachePromise = ensureAgentResultCache();
-            const artifact = new ArtifactImpl<T>(undefined, cachePromise, finalTenantId, options?.mimeType);
-            if (val !== undefined) {
-                // Fire and forget set (handled internally by ArtifactImpl tracking _pendingWrite)
-                artifact.set(val).catch((err: unknown) => {
-                    agentLogger.error('Failed to set artifact value in background', err);
-                });
-            }
-            return artifact;
+    const artifactsFactory = createArtifactFactory({
+        tenantId: finalTenantId,
+        resolveCache: ensureAgentResultCache,
+        onFailure: ({ operation, error, artifactId }) => {
+            agentLogger.error('Artifact factory operation failed', {
+                operation,
+                tenantId: finalTenantId,
+                taskId,
+                agentId: agentName,
+                artifactId,
+                error: error instanceof Error ? error.message : String(error),
+            });
         },
-        text: (val?: string): ArtifactHandle<string> =>
-            artifactsFactory.create<string>(val, { mimeType: 'text/plain' }),
-        json: <T>(val?: T): ArtifactHandle<T> =>
-            artifactsFactory.create<T>(val, { mimeType: 'application/json' })
-    };
+    });
 
     const partialCtx: PartialTaskContext = {
         tenantId: finalTenantId,
@@ -249,14 +287,14 @@ export async function runAgentWithStreaming(
         },
         artifacts: artifactsFactory,
         llm: plugin.llmAdapter || {
-            async call<T = unknown>(message: string, options?: Record<string, any>): Promise<UniversalChatResponse<T>[]> {
+            async call<T = unknown>(message: LLMMessage, options?: LLMCallOptions): Promise<UniversalChatResponse<T>[]> {
                 agentLogger.warn(`llm.call is stubbed (no LLM adapter configured)`, { message, options });
                 return [{
                     content: "Stubbed LLM response - agent has no llmConfig",
                     role: "assistant"
                 } as UniversalChatResponse<T>];
             },
-            async *stream<T = unknown>(message: string, options?: Record<string, any>): AsyncIterable<UniversalStreamResponse<T>> {
+            async *stream<T = unknown>(message: LLMMessage, options?: LLMCallOptions): AsyncIterable<UniversalStreamResponse<T>> {
                 agentLogger.warn(`llm.stream is stubbed (no LLM adapter configured)`, { message, options });
                 yield {
                     content: "Stubbed LLM response - agent has no llmConfig",
@@ -267,7 +305,7 @@ export async function runAgentWithStreaming(
             addToolResult(id: string, result: string, name: string): void {
                 agentLogger.warn(`llm.addToolResult is stubbed (no LLM adapter configured)`, { id, name });
             },
-            updateSettings(settings: Record<string, any>): void {
+            updateSettings(settings: LLMSettings): void {
                 agentLogger.warn(`llm.updateSettings is stubbed (no LLM adapter configured)`, { settings });
             }
         },
@@ -341,10 +379,15 @@ export async function runAgentWithStreaming(
 
     // memory registry constructed
 
-    // Add A2A capability - contextWithMemory is already a complete TaskContext
-    (contextWithMemory as any).sendTaskToAgent = async (targetAgent: string, taskInput: TaskInput, options?: any) => {
-        return globalA2AService.sendTaskToAgent(contextWithMemory as any, targetAgent, taskInput, options);
-    };
+    // A2A + conversation bootstrap: delegate to TaskEngine when registered (parity with ApiBinder path)
+    const engine = EngineLocator.getEngine<TaskEngine>();
+    const coreCtx = contextWithMemory as unknown as TaskContext;
+    const streamingSend = engine?.createStreamingSendTaskToAgent(coreCtx);
+    coreCtx.sendTaskToAgent = (
+        streamingSend ??
+        ((targetAgent: string, taskInput: TaskInput, options?: import('../shared/types/A2ATypes.js').A2ACallOptions) =>
+            globalA2AService.sendTaskToAgent(coreCtx, targetAgent, taskInput, options))
+    ) as TaskContext['sendTaskToAgent'];
 
     // The context is now complete - no need for type assertion
     const taskCtx: TaskContext = {
@@ -380,7 +423,7 @@ export async function runAgentWithStreaming(
     };
 
     // Extend the context with streaming capabilities
-    extendContextWithStreaming(taskCtx, options.isStreaming);
+    extendContextWithStreaming(taskCtx, options.isStreaming, runnerEventBus);
 
     // --- Check Cache Before Agent Execution ---
     if (cacheEnabled) {
@@ -407,7 +450,30 @@ export async function runAgentWithStreaming(
                             timestamp: new Date().toISOString(),
                             metadata: { source: 'cache', usage: { totalCost: 0, byKind: {} } }
                         } as any;
-                        try { eventBus.publish(taskChannel(taskId), { id: taskId, status: finalStatus, final: true } as any); } catch { }
+                        deliverTerminal(finalStatus, `${taskId}:terminal:cache`);
+                        try {
+                            void runnerEventBus.publish(
+                                createBusEvent({
+                                    channel: taskChannel(taskId),
+                                    partitionKey: taskId,
+                                    cloud: {
+                                        id: uuidv7(),
+                                        type: 'task.a2a',
+                                        source: `/tasks/${taskId}`,
+                                        time: new Date().toISOString(),
+                                        datacontenttype: 'application/json',
+                                    data: {
+                                        id: taskId,
+                                        status: finalStatus,
+                                        final: true,
+                                        deliveryKey: `${taskId}:terminal:cache`,
+                                    },
+                                    },
+                                })
+                            );
+                        } catch {
+                            /* noop */
+                        }
                     } catch (error) {
                         agentLogger.error('Failed to replay cached result in streaming mode', error);
                         await taskCtx.fail(error);
@@ -432,7 +498,7 @@ export async function runAgentWithStreaming(
 
                     // Use transport to output results
                     if (results.status) {
-                        transport.handleStatus(results.status as any, true);
+                        deliverTerminal(results.status as any, `${taskId}:terminal:cache`);
                     }
                     for (const artifact of results.artifacts) {
                         transport.handleArtifact(artifact);
@@ -440,53 +506,26 @@ export async function runAgentWithStreaming(
 
                     logTraceMethod.call(runnerLogger, `Agent Execution Completed (from cache) for Task ${taskCtx.task.id}`);
                 }
-                return;
+                await mainSubscription.unsubscribe().catch(() => undefined);
+                const cachePrisma = agentResultCachePrisma as PrismaClient | null;
+                if (cachePrisma?.$disconnect) {
+                    await cachePrisma.$disconnect().catch(() => undefined);
+                }
+                await import('@a2arium/callagent-memory-engine')
+                    .then((memory) => memory.disconnectMemoryPrismaClient())
+                    .catch(() => undefined);
+                return { terminal: true, state: 'completed' };
             }
         } catch (error) {
             agentLogger.error('Result cache lookup failed', error);
         }
     }
 
-    // If caching enabled, subscribe to final completion to persist result using original input as key
-    if (cacheEnabled) {
-        const channel = taskChannel(taskId);
-        const cacheListener = async (event: A2AEvent) => {
-            agentLogger.debug(`Cache listener received event`, { hasStatus: 'status' in event, final: (event as any).final, state: (event as any).status?.state });
-            if ('status' in event && event.final === true && (event.status as any)?.state === 'completed') {
-                try {
-                    const resultToCache = (event.status as any)?.metadata?.result;
-                    agentLogger.info(`Caching result for agent ${plugin.resolved.agentCard.name}`, { hasResult: resultToCache !== undefined });
-                    if (resultToCache !== undefined) {
-                        try {
-                            const cache = await ensureAgentResultCache();
-                            await cache.setCachedResult(
-                                plugin.resolved.agentCard.name,
-                                input,
-                                resultToCache,
-                                plugin.resolved.runtimeManifest.cache?.ttlSeconds || 300,
-                                plugin.resolved.runtimeManifest.cache?.excludePaths || [],
-                                finalTenantId
-                            );
-                            agentLogger.info(`Result cached successfully for agent ${plugin.resolved.agentCard.name}`);
-                        } catch (error) {
-                            agentLogger.error('Failed to persist cached result', error);
-                        }
-                    }
-                } catch (error) {
-                    agentLogger.error('Failed to cache agent result on completion', error);
-                } finally {
-                    try { eventBus.unsubscribe(channel, cacheListener as any); } catch { }
-                }
-            }
-        };
-        try { eventBus.subscribe(channel, cacheListener as any); } catch { }
-    }
-
     // --- Execute via Task Engine ---
     agentLogger.info(`Starting Engine Execution for Task ${taskCtx.task.id}`);
 
     // Establish logging context for entire task execution
-    await withLoggingContext(
+    return withLoggingContext(
         {
             taskId: taskCtx.task.id,
             tenantId: finalTenantId,
@@ -494,6 +533,7 @@ export async function runAgentWithStreaming(
             correlationId: `corr-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
         },
         async () => {
+            let cleanupExecution: (() => Promise<void>) | undefined;
             try {
                 // Register durable handlers from the module
                 try {
@@ -520,7 +560,28 @@ export async function runAgentWithStreaming(
 
                 const sessionStore = new WorkingMemorySessionStore();
                 await sessionStore.connect();
-                const engine = new TaskEngine({ sessionStore });
+                const engine = new TaskEngine({ sessionStore, eventBus: runnerEventBus });
+                let cleanedUp = false;
+                const cleanup = async (): Promise<void> => {
+                    if (cleanedUp) return;
+                    cleanedUp = true;
+                    await mainSubscription.unsubscribe().catch(() => undefined);
+                    try { await globalA2AService.waitForPendingNotifications(); } catch (err) {
+                        runnerLogger.warn('Failed waiting for pending A2A notifications', {
+                            error: err instanceof Error ? err.message : String(err)
+                        });
+                    }
+                    try { engine.stopOutboxPublisher(); } catch { /* noop */ }
+                    try { await engine.closeTransportAdapters(); } catch { /* noop */ }
+                    try { await sessionStore.close(); } catch { /* noop */ }
+                    try { EngineLocator.setEngine(null as any); } catch { /* noop */ }
+                    if (agentResultCachePrisma?.$disconnect) {
+                        try { await agentResultCachePrisma.$disconnect(); } catch { /* noop */ }
+                    }
+                    try { await (globalA2AService as any)?.agentResultCache?.prisma?.$disconnect?.(); } catch { /* noop */ }
+                    try { await (await import('@a2arium/callagent-memory-engine')).disconnectMemoryPrismaClient(); } catch { /* noop */ }
+                };
+                cleanupExecution = cleanup;
                 try { EngineLocator.setEngine(engine as any); } catch { }
                 const entity: TaskEntity = { id: taskCtx.task.id, input };
                 runnerLogger.info(`Starting TaskEngine.startTask`, { taskId: entity.id, streaming: options.isStreaming });
@@ -528,47 +589,135 @@ export async function runAgentWithStreaming(
                 if (wmCap) {
                     runnerLogger.info(`WM snapshot cap configured`, { WM_SNAPSHOT_MAX_BYTES: wmCap });
                 }
+                const runStartedAtMs = Date.now();
+                const activeRun = resolveActiveRunTimeout({
+                    explicitTimeoutMs: process.env.CALLAGENT_ACTIVE_RUN_TIMEOUT_MS,
+                    realRunTimeoutMs: process.env.REAL_RUN_TIMEOUT_MS,
+                    latencyBudgetMs: plugin.resolved.runtimeManifest.budgets?.latencyMs,
+                });
+                const terminalDrain = resolveTerminalDrainTimeout(
+                    process.env.CALLAGENT_BACKGROUND_TASK_TIMEOUT_MS
+                );
                 const returnedTask = await engine.startTask({ task: entity, isStreaming: options.isStreaming, agentId: agentName, tenantId: finalTenantId, initialContext: taskCtx, options: { maxTurns: options.maxTurns } });
-                if (returnedTask && returnedTask.status?.state === 'failed') {
-                    // ✅ BUG FIX: Explicitly throw to ensure CLI process exits with non-zero code on unhandled runLoop errors
-                    const failMsg = returnedTask.status.metadata?.reason ||
-                        (returnedTask.status.message?.parts?.find(p => p.type === 'text') as any)?.text ||
-                        'Task execution failed';
-                    throw new AgentError(failMsg, agentName, { taskId: taskCtx.task.id });
+                let authoritativeStatus = returnedTask?.status;
+                if (
+                    authoritativeStatus === undefined ||
+                    authoritativeStatus.state === 'submitted' ||
+                    authoritativeStatus.state === 'working'
+                ) {
+                    runnerLogger.info('Waiting for durable root terminality', {
+                        taskId: taskCtx.task.id,
+                        timeoutMs: activeRun.timeoutMs,
+                        source: activeRun.source,
+                    });
+                    const observed = await engine.awaitTaskTerminal({
+                        tenantId: finalTenantId,
+                        taskId: taskCtx.task.id,
+                        agentId: agentName,
+                        timeoutMs: activeRun.timeoutMs,
+                        timeoutSource: activeRun.source,
+                        startedAtMs: runStartedAtMs,
+                    });
+                    authoritativeStatus = observed.status;
+                    if (returnedTask !== undefined) returnedTask.status = authoritativeStatus;
                 }
-                // Wait for any background tool executions (e.g. async requestTool) to complete
-                // This is critical for await_tool outcomes where the loop exits but __autoExecuteTool is still running
-                await engine.waitForBackgroundTasks(60000);
-                logTraceMethod.call(runnerLogger, `Engine Execution started for Task ${taskCtx.task.id}`);
-                if (!options.isStreaming) {
-                    logTraceMethod.call(runnerLogger, `Engine Execution Finished Successfully for Task ${taskCtx.task.id}`);
-                    try { await globalA2AService.waitForPendingNotifications(); } catch (err) {
-                        runnerLogger.warn('Failed waiting for pending A2A notifications', {
-                            error: err instanceof Error ? err.message : String(err)
+
+                const durableSnapshot = await sessionStore.getSessionSnapshot(finalTenantId, taskCtx.task.id);
+                const durableTerminal = readDurableTaskTerminal(durableSnapshot?.snapshot);
+                if (durableTerminal !== undefined) {
+                    authoritativeStatus = durableTerminal.status as TaskStatus;
+                    if (returnedTask !== undefined) returnedTask.status = authoritativeStatus;
+                    deliverTerminal(authoritativeStatus, durableTerminal.deliveryKey);
+                    if (cacheEnabled && authoritativeStatus.state === 'completed') {
+                        const resultToCache = authoritativeStatus.metadata?.result;
+                        if (resultToCache !== undefined) {
+                            try {
+                                const cache = await ensureAgentResultCache();
+                                await cache.setCachedResult(
+                                    plugin.resolved.agentCard.name,
+                                    input,
+                                    resultToCache,
+                                    plugin.resolved.runtimeManifest.cache?.ttlSeconds || 300,
+                                    plugin.resolved.runtimeManifest.cache?.excludePaths || [],
+                                    finalTenantId
+                                );
+                            } catch (error) {
+                                agentLogger.error('Failed to cache durable agent result', error);
+                            }
+                        }
+                    }
+                }
+
+                const isTerminal = authoritativeStatus?.state === 'completed' ||
+                    authoritativeStatus?.state === 'failed' ||
+                    authoritativeStatus?.state === 'canceled';
+                if (isTerminal) {
+                    runnerLogger.info('Draining terminal root cleanup', {
+                        taskId: taskCtx.task.id,
+                        timeoutMs: terminalDrain.timeoutMs,
+                        source: terminalDrain.source,
+                        taskState: authoritativeStatus?.state,
+                    });
+                    const drainReport = await engine.drainBackgroundTasks({
+                        rootTaskId: taskCtx.task.id,
+                        timeoutMs: terminalDrain.timeoutMs,
+                        throwOnTimeout: false,
+                    });
+                    if (drainReport.detachedCount > 0 || drainReport.activeCount > 0) {
+                        runnerLogger.warn('Terminal result preserved with background cleanup diagnostics', {
+                            taskId: taskCtx.task.id,
+                            detachedCount: drainReport.detachedCount,
+                            activeCount: drainReport.activeCount,
+                            remainingTasks: drainReport.remainingTasks,
                         });
                     }
-                    try { await sessionStore.close(); } catch { }
-                    try { EngineLocator.setEngine(null as any); } catch { }
-                    if (agentResultCachePrisma?.$disconnect) {
-                        try { await agentResultCachePrisma.$disconnect(); } catch { }
-                    }
-                    try { (globalA2AService as any)?.agentResultCache?.prisma?.$disconnect?.(); } catch { }
-                    try { await (await import('@a2arium/callagent-memory-engine')).disconnectMemoryPrismaClient(); } catch { }
-                    try { (outboxPublisher as any)?.stop?.(); } catch { }
                 }
+
+                if (authoritativeStatus?.state === 'failed' || authoritativeStatus?.state === 'canceled') {
+                    if (durableTerminal === undefined) {
+                        deliverTerminal(
+                            authoritativeStatus,
+                            `${taskCtx.task.id}:terminal:${authoritativeStatus.state}`
+                        );
+                    }
+                    await cleanup();
+                    const reason = typeof authoritativeStatus.metadata?.reason === 'string'
+                        ? authoritativeStatus.metadata.reason
+                        : (authoritativeStatus.message?.parts?.find(p => p.type === 'text') as any)?.text ||
+                          (authoritativeStatus.state === 'failed' ? 'Task execution failed' : 'Task canceled');
+                    throw new AgentError(reason, agentName, {
+                        taskId: taskCtx.task.id,
+                        terminalStatusPreserved: true,
+                    });
+                }
+                logTraceMethod.call(runnerLogger, `Engine Execution started for Task ${taskCtx.task.id}`);
+                if (isTerminal || !options.isStreaming) {
+                    logTraceMethod.call(runnerLogger, `Engine Execution Finished Successfully for Task ${taskCtx.task.id}`);
+                    await cleanup();
+                }
+                return {
+                    terminal: isTerminal,
+                    ...(authoritativeStatus?.state ? { state: authoritativeStatus.state } : {}),
+                };
             } catch (error: unknown) {
+                await cleanupExecution?.().catch(() => undefined);
+                if (hasHatchetWorkerLifetimeLostCause(error)) throw error;
                 // Use agentLogger here for error
                 agentLogger.error(`Unhandled Agent Execution Error`, error, {
                     taskId: taskCtx.task.id
                 });
 
-                try {
-                    if (taskCtx.fail) {
-                        await taskCtx.fail(new Error('Unhandled exception during task execution'));
-                    } else {
-                        taskCtx.complete(100, 'failed_unhandled');
-                    }
-                } catch { /* ignore double failure */ }
+                const terminalStatusPreserved =
+                    error instanceof AgentError && error.details?.terminalStatusPreserved === true;
+                if (!terminalStatusPreserved) {
+                    try {
+                        if (taskCtx.fail) {
+                            await taskCtx.fail(new Error('Unhandled exception during task execution'));
+                        } else {
+                            taskCtx.complete(100, 'failed_unhandled');
+                        }
+                    } catch { /* ignore double failure */ }
+                }
 
                 if (error instanceof InvariantError || error instanceof ModuleExecutionError) {
                     throw error;
@@ -589,6 +738,15 @@ export async function runAgentWithStreaming(
                 }
             }
         }); // End of withLoggingContext
+}
+
+/** Public compatibility wrapper. CLI callers use the detailed result internally. */
+export async function runAgentWithStreaming(
+    agentFilePath: string,
+    input: TaskInput,
+    options: StreamingOptions
+): Promise<void> {
+    await runAgentWithStreamingDetailed(agentFilePath, input, options);
 }
 
 
@@ -736,14 +894,16 @@ function pickBackends<T>(allBackends: Record<string, T>, names: string[]): Recor
 /**
  * Set up listeners for progress events only (for non-streaming mode)
  */
-function setupProgressListeners(taskId: string): void {
+function setupProgressListeners(taskId: string, bus: IEventBus): void {
     const channel = taskChannel(taskId);
-
-    // Add event listener for this task channel
-    eventBus.subscribe(channel, (event: A2AEvent) => {
+    void bus.subscribe(channel, async (be: BusEvent) => {
+        const event = busEventData<A2AEvent>(be);
+        if (!event || !('status' in event)) {
+            return;
+        }
         if ('status' in event) {
             const s = event.status;
-            if (s.state === 'input-required' || (s.state as any) === 'waiting_input') {
+            if (s.state === 'input-required' || (s.state as unknown) === 'waiting_input') {
                 console.log(`Status: waiting_input`);
                 const promptText = s.message?.parts
                     ?.filter(part => part.type === 'text')
@@ -751,15 +911,12 @@ function setupProgressListeners(taskId: string): void {
                     .filter(Boolean)
                     .join(' ');
                 if (promptText) console.log(`Prompt: ${promptText}`);
-                const token = (s as any).metadata?.token;
+                const token = (s as { metadata?: { token?: string } }).metadata?.token;
                 if (token) console.log(`Token: ${token}`);
-                // Also display session id for convenience
                 console.log(`Session: ${event.id}`);
             } else if (s.state === 'working') {
-                // Check for progress percentage first
                 const progressPercentage = s.metadata?.progress;
                 if (s.message?.parts) {
-                    // Display progress messages for working states
                     const textParts = s.message.parts
                         .filter(part => part.type === 'text')
                         .map(part => (part as { text?: string }).text)
@@ -772,17 +929,10 @@ function setupProgressListeners(taskId: string): void {
                         }
                     }
                 } else if (typeof progressPercentage === 'number') {
-                    // Just show percentage if no message
                     console.log(`Progress: ${progressPercentage}%`);
                 }
             }
         }
-
-        // Unsubscribe when task is complete
-        if ('status' in event && (event.status.state === 'completed' || event.status.state === 'failed')) {
-            eventBus.unsubscribe(channel, setupProgressListeners);
-        }
     });
-
     runnerLogger.debug(`Set up progress listeners for task channel: ${channel}`);
-} 
+}

@@ -12,6 +12,9 @@ import { logger } from '@a2arium/callagent-utils';
 
 const serializerLogger = logger.createLogger({ prefix: 'ContextSerializer' });
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+    typeof value === 'object' && value !== null;
+
 /**
  * Service for serializing and deserializing agent context
  * Integrates with MLO pipeline and existing memory operations
@@ -190,12 +193,17 @@ export class ContextSerializer {
 
                 // Transform raw recalled items into RecalledMemoryItem structure
                 for (const item of rawRecalledItems) {
-                    if (item && typeof item.id === 'string' && typeof item.type === 'string' && item.data) {
+                    if (
+                        isRecord(item)
+                        && typeof item.id === 'string'
+                        && typeof item.type === 'string'
+                        && item.data !== undefined
+                    ) {
                         recalledItems.push({
                             id: item.id,
                             type: item.type, // Type is already 'semantic' | 'episodic' | string from RecalledMemoryItem
                             data: item.data,
-                            metadata: item.metadata
+                            metadata: isRecord(item.metadata) ? item.metadata : undefined
                         });
                     } else {
                         serializerLogger.warn('Skipping malformed recalled item during serialization', { item });
@@ -250,8 +258,8 @@ export class ContextSerializer {
                 // For A2A context transfer, bypass MLO processing and set goal directly in adapter
                 // This avoids the MLO pipeline size limits and complex object transformations
                 // Try direct setGoal method first (for tests), then fallback to goals.add API
-                if ((ctx as any).goals?.add) {
-                    await (ctx as any).goals.add({ title: goalString });
+                if (ctx.goals?.add) {
+                    await ctx.goals.add({ title: goalString });
                 }
             }
 

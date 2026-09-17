@@ -52,6 +52,8 @@ Stage and stage marks should encode only orchestration facts such as:
 - Stage writes should go through StageFacade, not ad hoc helpers.
 - Invariants should describe control requirements only.
 
+If the agent maintains **`flow.md`**, the **Stages** subsection there should list the **same stage names** as your stage union / `createStageFacade` configuration (exact spelling). That keeps procedural docs, StageFacade, and traces aligned. See [How-to: `flow.md` for APLRET agents](./13-flow_md_for_aplret_agents.md).
+
 ## When to use StageFacade
 
 Use StageFacade when your agent has at least one of these:
@@ -199,7 +201,9 @@ If the mark would still matter to Policy after the stage changes, it probably be
 Allowed examples:
 
 - `ctx.progress(...)`
-- `ctx.complete(...)` if completion is treated as runtime status emission
+- `ctx.complete(...)` to record a terminal intent. In fenced loop mode the call
+  does not publish a terminal status; the explicit transition returned by the
+  loop remains authoritative and publishes only after durable arbitration.
 
 Not allowed:
 
@@ -344,4 +348,3 @@ When a stage-related change is proposed, ask:
 ## Fast PR comment
 
 > Please use StageFacade as the control-plane entry point for this flow. Keep stage out of `MentalState` and out of Policy, keep invariants control-only, and keep `onEnter` telemetry-only. Add TurnTrace and invariant tests for the new stage transition.
-

@@ -16,6 +16,12 @@ Use this guide when an agent needs to delegate work to a child agent and correct
 - Child dispatch is an effect and happens only in Execution.
 - Child completion re-enters only as a `child.completed` observation.
 
+## Phase 3: `sendTaskToAgent` and threads
+
+`sendTaskToAgent` is implemented over **`ctx.conversation.startThread` / `send`** (plus A2A). That means a **durable thread message** and inbox observations align with direct conversation usage. **`A2ACallOptions.timeout` is enforced across the complete asynchronous child lifecycle**, including a child suspended on an asynchronous tool.
+
+To continue an existing thread across multiple child calls, pass **`A2ACallOptions.conversation: ThreadRef`** (thread-only). The child can read the `ThreadRef` from its inbox and answer with **`ctx.conversation.send(threadRef, ...)`**.
+
 ## The canonical flow (two turns)
 
 ### Turn N (dispatch)
@@ -70,6 +76,8 @@ Each turn’s **TurnTrace** can include **`childCalls`**: an array of **ChildCal
 - **`resultSummary`**, **`error`** when applicable
 
 Parent and child traces are linked in telemetry via **ChildCallNode** (node type `'child'`): the parent turn’s span has a child span for each dispatched child, and optional `childTraceId` / `childAgentNodeId` connect to the child run’s trace. Use **`trace.childCalls`** when debugging or testing to verify which child was dispatched, with which token, and when it completed.
+
+For operator-facing parent/child topology, use the semantic run graph (`GET /tasks/:taskId/run-graph`; see [Operator Run Graph](./operator-run-graph.md)). Child dispatches become `AgentRunEdge` entries with `parentTaskId`, `childTaskId`, `parentAgentId`, `childAgentId`, `edgeToken`, and status/result/error previews. Raw child task IDs and TurnTrace child-call fields are still the debugging evidence, but the graph is the user-facing navigation layer.
 
 ## Step-by-step implementation
 
@@ -132,12 +140,12 @@ Rules:
 ### Step 3: Transition to await_child using the same token
 
 ```ts
-transition: (_env, exec) => {
+transition: (_env, exec, _m, _mem) => {
   if (exec.action.kind === 'child') {
     return { kind: 'await_child', token: exec.action.token };
   }
 
-  return { kind: 'continue', observations: [] };
+  return { kind: 'complete', result: { ok: true } };
 };
 ```
 
@@ -229,10 +237,42 @@ Policy will now see `profileStatus` and branch correctly, without touching contr
 
 ### Pattern C: timeout
 
-If the runtime supports child timeouts:
+When `sendTaskToAgent(..., { awaitCompletion: false, timeout })` sets a positive timeout:
 
-- runtime injects `source:'child', kind:'child.failed'` with timeout metadata
+- runtime injects `source:'child', kind:'child.failed'` with correlated `token`, `agentId`, and `childTaskId`
+- `payload.error` is `{ code: 'CHILD_TIMEOUT', message, timeoutMs }`
+- completion and expiry race atomically; only one terminal observation resumes the parent
+- a result arriving after expiry is retained as `task.child_late_completion` diagnostics and never resumes the parent again
+- timeout detaches the child branch from parent-result delivery. Any nested async tool tokens are terminalized as `detached`; their late results produce diagnostics but no child or parent wake
+- in-process auto-executed tools receive a best-effort abort request when their owner branch detaches. Providers that cannot honor cancellation may continue physically, but their promises no longer block terminal runner drain
+- the pending-child removal, terminal tombstone, and inbox observation commit in one snapshot update; a concurrent parent save reloads and merges that terminal state instead of resurrecting the child
+- after a crash between snapshot commit and wake publication, SQL-backed runtimes recover the terminal observation from the parent snapshot and republish the same deterministic wake
 - Perception normalizes and Learning writes a failure fact
+
+`CHILD_WAKE_TIMEOUT` is different: it is the Hatchet operational watchdog for a missing
+wake after child execution, not the configured per-call lifecycle deadline.
+
+### Terminal runner drain ownership
+
+Background drain waits only for operations that can still affect the active task graph.
+Once a completed, failed, canceled, or timed-out owner revokes delivery, its nested tool
+operations are retained as detached diagnostics and cannot replace the task's terminal
+result. Unowned legacy work and genuine non-terminal background operations remain strict
+drain blockers.
+
+Effect registration uses the same lifecycle boundary. Tools, child calls, child groups,
+and their timers are written to the active owner's snapshot before any event, timer, or
+provider dispatch occurs. Registration racing detachment has one winner:
+
+- if registration commits first, later branch detachment sees and terminalizes the effect;
+- if detachment commits first, registration throws `TASK_LIFECYCLE_TERMINAL` and starts nothing;
+- provider factories are registered locally in a lazy `registering` state and revalidate the
+  durable owner before invocation, closing the post-commit/process-local tracking gap;
+- drain periodically reloads active owners, so detachment committed by another process
+  removes local provider work from the blocking set and requests cooperative abort.
+
+`TASK_LIFECYCLE_TERMINAL` is an expected terminal stop. Runtime drivers must not retry the
+stale segment or replace the task result that already won the lifecycle claim.
 
 ## Common bugs and how to spot them with TurnTrace
 
@@ -294,3 +334,20 @@ In tests, assert TurnTrace fields:
 - memory hash change on Learning write
 - next intent changes only after Learning write
 
+## Thread conversation interplay
+
+`sendTaskToAgent` remains valid for child-await orchestration.  
+ `ctx.conversation` is used for thread-native messaging.
+
+- Use `sendTaskToAgent` when you want explicit child await semantics (`await_child(token)`).
+- Use `ctx.conversation.startThread/send` when you need durable thread identity and multi-message follow-up.
+- Both paths obey the same APLRET rule: effects in Execution, cognition updates only after observation re-entry.
+
+## Topic invite interplay (Phase 2b)
+
+Topic invites are conversation effects, not child-await primitives:
+
+- issue invite in Execution via `ctx.conversation.invite(...)`
+- receive invite as `conversation/topic.invite.received` observation on a later turn
+- optionally auto-join when runtime manifest sets `communication.autoJoinInvitedTopics = true`
+- use `ctx.conversation.join(...)` or `ctx.conversation.decline(...)` in Execution; never from Policy directly

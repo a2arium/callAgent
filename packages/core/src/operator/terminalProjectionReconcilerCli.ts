@@ -1,0 +1,43 @@
+#!/usr/bin/env node
+import 'dotenv/config';
+import { WorkingMemorySessionStore } from '@a2arium/callagent-memory-sql';
+import { OperatorProjectionRepository } from './semanticProjection.js';
+
+async function main(): Promise<void> {
+    const store = new WorkingMemorySessionStore();
+    await store.connect();
+    const prisma = store.getPrismaClient();
+    const projection = new OperatorProjectionRepository(prisma as never);
+    const rawBatchSize = Number.parseInt(process.env.CALLAGENT_PROJECTION_RECONCILE_BATCH_SIZE ?? '', 10);
+    const batchSize = Number.isInteger(rawBatchSize) && rawBatchSize > 0 ? rawBatchSize : 100;
+    try {
+        const summary = await projection.reconcileAllDurableTerminals({
+            batchSize,
+            onBatch: (progress) => {
+                console.info('[TerminalProjectionReconciler] progress', progress);
+            },
+        });
+        console.info('[TerminalProjectionReconciler] complete', summary);
+        const logicalTurns = await projection.reconcileLogicalTurnCounts({
+            batchSize,
+            tenantId: process.env.CALLAGENT_PROJECTION_RECONCILE_TENANT_ID,
+            taskId: process.env.CALLAGENT_PROJECTION_RECONCILE_TASK_ID,
+        });
+        console.info('[LogicalTurnCountReconciler] complete', logicalTurns);
+        const cognition = await projection.reconcileCognitiveTurns({
+            batchSize,
+            tenantId: process.env.CALLAGENT_PROJECTION_RECONCILE_TENANT_ID,
+            taskId: process.env.CALLAGENT_PROJECTION_RECONCILE_TASK_ID,
+        });
+        console.info('[CognitiveProjectionReconciler] complete', cognition);
+    } finally {
+        await prisma.$disconnect();
+    }
+}
+
+main().catch((error) => {
+    console.error('[TerminalProjectionReconciler] failed', {
+        message: error instanceof Error ? error.message : String(error),
+    });
+    process.exitCode = 1;
+});

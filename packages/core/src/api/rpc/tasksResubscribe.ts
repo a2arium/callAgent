@@ -16,7 +16,10 @@ export async function handleTasksResubscribe(req: Request, res: Response): Promi
 
         // Simply hand off to SSE handler with the existing task ID
         // No need to start a new task - just reopen the event stream
-        handleSSE(req, res, params.id);
+        const tenantId = typeof params.tenantId === 'string'
+            ? params.tenantId
+            : (req as any).tenantId || 'default';
+        handleSSE(req, res, params.id, undefined, tenantId);
     } catch (error) {
         console.error('Error handling tasks/resubscribe:', error);
         sendError(

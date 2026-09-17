@@ -43,6 +43,7 @@ export interface BuildAgentIndexOptions {
     /**
      * When true, the builder will include unresolved (source) module paths even if no compiled artifact exists.
      * Helpful in CI diagnostics, but disabled by default to ensure index contains runnable modules.
+     * This only affects index contents and does not change Node.js runtime import behavior.
      */
     allowSourceFallback?: boolean;
 }
@@ -254,10 +255,16 @@ export async function buildAgentIndex(options: BuildAgentIndexOptions = {}): Pro
         }
 
         const base = path.basename(modulePath).toLowerCase();
+        const ext = path.extname(base);
+        const moduleName = base.slice(0, Math.max(0, base.length - ext.length));
+        const runtimeModuleExtensions = new Set(['.js', '.mjs', '.cjs']);
+        const sourceModuleExtensions = new Set(['.ts', '.mts', '.cts']);
+        const isExtensionAllowed =
+            runtimeModuleExtensions.has(ext) ||
+            (options.allowSourceFallback === true && sourceModuleExtensions.has(ext));
         const isLikelyAgentModule =
-            base === 'agent.js' ||
-            base === 'agentmodule.js' ||
-            base.endsWith('agent.js');
+            isExtensionAllowed &&
+            (moduleName === 'agent' || moduleName === 'agentmodule' || moduleName.endsWith('agent'));
         if (!isLikelyAgentModule) {
             continue;
         }

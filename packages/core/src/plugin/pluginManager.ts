@@ -87,7 +87,9 @@ export class PluginManager {
             // Load agents in dependency order
             for (const dependencyAgentName of resolution.loadingOrder) {
                 if (!this.isAgentLoaded(dependencyAgentName)) {
-                    const agentPlugin = await this.loadAgent(dependencyAgentName, contextPath);
+                    // Do not pass the main agent's path: same-folder discovery would resolve the wrong package
+                    // for dependency names (e.g. workspace sibling agents).
+                    const agentPlugin = await this.loadAgent(dependencyAgentName, undefined);
                     if (agentPlugin) {
                         loadedAgents.push(agentPlugin);
                     }

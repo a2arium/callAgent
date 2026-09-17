@@ -1,51 +1,87 @@
 import { PrismaClient } from '../generated/prisma-client/index.js';
 import { PrismaPg } from '@prisma/adapter-pg';
-import pg from 'pg';
 import { logger } from '@a2arium/callagent-utils';
 import { getSafePgConfig } from '../pgStartupDiagnostic.js';
-
-type PrismaClientType = InstanceType<typeof PrismaClient>;
+import type { IEventBus } from '../public-types/eventbus/types.js';
+import {
+    claimOutboxRow,
+    deleteClaimedOutboxRow,
+    dispatchOutboxRow,
+    handleOutboxDispatchFailure,
+    readOutboxStorageNow,
+    shouldPollerSkipOutboxRow,
+    type OutboxRow,
+} from './outboxDispatch.js';
+import { v7 as uuidv7 } from 'uuid';
+import { defaultMetricsRegistry } from '../observability/metrics.js';
 
 const log = logger.createLogger({ prefix: 'OutboxPublisher' });
 
-type OutboxRow = { id: string; tenantId: string; topic: string; key: string; payload: any; createdAt: Date };
+type PrismaClientType = InstanceType<typeof PrismaClient>;
+
+export type OutboxPublisherOptions = {
+    eventBus: IEventBus;
+    getPrisma?: () => PrismaClientType | null | undefined;
+    /** @default 10 */
+    maxRetries?: number;
+    /** @default 500 */
+    pollIntervalMs?: number;
+};
 
 export class OutboxPublisher {
-    private prisma: PrismaClientType;
+    private prisma: PrismaClientType | null;
     private running = false;
-    private lastId: string | null = null;
     private timeoutId: NodeJS.Timeout | null = null;
-    private ownsPrisma: boolean;
+    private readonly ownsPrisma: boolean;
+    private readonly eventBus: IEventBus;
+    private readonly getPrisma?: () => PrismaClientType | null | undefined;
+    private readonly maxRetries: number;
+    private readonly pollIntervalMs: number;
+    private lastProcessRowScavengeAt = 0;
 
-    constructor(prisma?: PrismaClientType) {
-        this.ownsPrisma = !prisma;
-        if (prisma) {
-            this.prisma = prisma;
+    constructor(options: OutboxPublisherOptions) {
+        this.eventBus = options.eventBus;
+        this.getPrisma = options.getPrisma;
+        this.maxRetries = options.maxRetries ?? 10;
+        this.pollIntervalMs = options.pollIntervalMs ?? 500;
+        if (options.getPrisma) {
+            this.prisma = options.getPrisma() ?? null;
+            this.ownsPrisma = false;
         } else {
+            this.ownsPrisma = true;
             const dbUrl = process.env.MEMORY_DATABASE_URL;
             if (!dbUrl) {
                 log.warn('MEMORY_DATABASE_URL not found. OutboxPublisher will be disabled.');
-                this.prisma = null as any;
+                this.prisma = null;
                 return;
             }
-            console.log(`[OutboxPublisher] Initializing with: ${dbUrl.split('@')[1] || 'hidden'}`);
             if (typeof dbUrl !== 'string') {
-                throw new Error(`Invalid type for database URL: expected string, received ${typeof dbUrl}. Check your environment variables.`);
+                throw new Error(
+                    `Invalid type for database URL: expected string, received ${typeof dbUrl}. Check your environment variables.`
+                );
             }
             const config = getSafePgConfig(dbUrl);
             this.prisma = new PrismaClient({
                 adapter: new PrismaPg(config, { schema: 'public' }),
-                log: ['error'] // Bug 4 Fix: Reduced logging spam
-            }) as any;
+                log: ['error'],
+            }) as PrismaClientType;
         }
     }
 
-    start(intervalMs = 500): void {
+    start(intervalMs?: number): void {
+        if (this.eventBus.deliveryScope !== 'shared') {
+            log.debug('OutboxPublisher global scan disabled for process-local event bus');
+            return;
+        }
+        const ms = intervalMs ?? this.pollIntervalMs;
+        this.refreshPrismaFromGetter();
         if (!this.prisma) {
             log.debug('OutboxPublisher start() ignored: no prisma client');
             return;
         }
-        if (this.running) return;
+        if (this.running) {
+            return;
+        }
         this.running = true;
         const tick = async () => {
             if (!this.running) {
@@ -53,96 +89,118 @@ export class OutboxPublisher {
                 return;
             }
             try {
+                this.refreshPrismaFromGetter();
                 await this.publishOnce();
             } catch (e) {
-                log.warn('publishOnce failed', e as any);
+                log.warn('publishOnce failed', e as { message?: string });
             } finally {
-                // Fix race condition: only schedule next tick if still running (Hypothesis 1)
                 if (this.running) {
-                    this.timeoutId = setTimeout(tick, intervalMs);
+                    this.timeoutId = setTimeout(tick, ms);
                 } else {
                     log.debug('Skipping setTimeout - not running');
                 }
             }
         };
-        tick();
+        void tick();
+    }
+
+    private refreshPrismaFromGetter(): void {
+        if (this.getPrisma) {
+            this.prisma = this.getPrisma() ?? null;
+        }
     }
 
     stop(): void {
         this.running = false;
-        // Clear any pending timeout
         if (this.timeoutId) {
             clearTimeout(this.timeoutId);
             this.timeoutId = null;
         }
     }
 
-    /**
-     * Check if publisher is currently running
-     */
     isActive(): boolean {
         return this.running;
     }
 
-    /**
-     * Disconnect the Prisma client if this instance owns it
-     * This prevents hanging database connections (Hypothesis 3)
-     */
     async disconnect(): Promise<void> {
         this.stop();
-        if (this.ownsPrisma) {
+        if (this.ownsPrisma && this.prisma) {
             try {
                 await this.prisma.$disconnect();
                 log.debug('Prisma client disconnected');
             } catch (error) {
-                log.warn('Error disconnecting Prisma client', error as any);
+                log.warn('Error disconnecting Prisma client', error as { message?: string });
             }
         }
     }
 
     private async publishOnce(): Promise<void> {
-        if (!this.prisma) return;
-        // Simple polling publisher; production should use NOTIFY/LISTEN or job queue
-        const rows: OutboxRow[] = await this.prisma.outbox.findMany({
+        if (!this.prisma) {
+            return;
+        }
+        await this.scavengeOrphanedProcessRows();
+        const storageNow = await readOutboxStorageNow(
+            this.prisma as unknown as Parameters<typeof readOutboxStorageNow>[0]
+        );
+        const rows = (await this.prisma.outbox.findMany({
+            where: {
+                AND: [
+                    { OR: [{ deliveryScope: 'shared' }, { deliveryScope: null }] },
+                    { OR: [{ dispatchLeaseUntil: null }, { dispatchLeaseUntil: { lte: storageNow } }] },
+                ],
+            },
             orderBy: { createdAt: 'asc' },
-            take: 50
-        }) as any;
+            take: 50,
+        })) as unknown as OutboxRow[];
         for (const row of rows) {
+            if (shouldPollerSkipOutboxRow(row)) {
+                continue;
+            }
+            const leaseId = uuidv7();
+            const claim = await claimOutboxRow({
+                prisma: this.prisma as unknown as Parameters<typeof claimOutboxRow>[0]['prisma'],
+                id: row.id,
+                leaseId,
+                scope: 'shared',
+            });
+            if (claim.disposition !== 'claimed' || !claim.row) {
+                continue;
+            }
             try {
-                // Idempotent consumers: include id and key for de-duplication
-                await this.dispatch(row);
-                // Idempotent delete - ignore if record already deleted by another process
-                await this.prisma.outbox.delete({ where: { id: row.id } }).catch((deleteError: any) => {
-                    // Check if it's a "record not found" error (P2025 in Prisma)
-                    if (deleteError.code === 'P2025' || deleteError.message?.includes('No record was found')) {
-                        log.debug('Outbox record already deleted by another process', { id: row.id });
-                        return; // This is expected in concurrent scenarios
-                    }
-                    throw deleteError; // Re-throw other errors
+                await dispatchOutboxRow({ eventBus: this.eventBus, row: claim.row });
+                await deleteClaimedOutboxRow({
+                    prisma: this.prisma as unknown as Parameters<typeof deleteClaimedOutboxRow>[0]['prisma'],
+                    id: row.id,
+                    leaseId,
                 });
             } catch (e) {
-                log.error('Failed to dispatch outbox row', e as any, { id: row.id, topic: row.topic });
-                // leave row for retry
+                await handleOutboxDispatchFailure({
+                    prisma: this.prisma as unknown as Parameters<typeof handleOutboxDispatchFailure>[0]['prisma'],
+                    row: claim.row,
+                    error: e,
+                    maxRetries: this.maxRetries,
+                    leaseId,
+                });
             }
         }
     }
 
-    private async dispatch(row: OutboxRow): Promise<void> {
-        // Map topics to transports; for now, log-only with CloudEvents envelope
-        const cloud = {
-            specversion: '1.0',
-            id: row.id,
-            type: row.topic,
-            source: `/tenants/${row.tenantId}/tasks/${row.key}`,
-            time: row.createdAt.toISOString(),
-            datacontenttype: 'application/json',
-            data: row.payload
-        };
-        // TODO: push to SSE/webhook/Kafka; here we just log for scaffold
-        log.debug('Dispatch', { topic: row.topic, key: row.key, id: row.id });
+    private async scavengeOrphanedProcessRows(): Promise<void> {
+        if (!this.prisma || Date.now() - this.lastProcessRowScavengeAt < 60 * 60 * 1000) return;
+        this.lastProcessRowScavengeAt = Date.now();
+        const configured = Number(process.env.CALLAGENT_PROCESS_OUTBOX_RETENTION_MS);
+        const retentionMs = Number.isFinite(configured) && configured > 0
+            ? configured
+            : 24 * 60 * 60 * 1000;
+        const result = await this.prisma.outbox.deleteMany({
+            where: {
+                deliveryScope: 'process',
+                createdAt: { lt: new Date(Date.now() - retentionMs) },
+            },
+        });
+        if (result.count > 0) {
+            defaultMetricsRegistry.increment('runtime.outbox_orphan_scavenged_total', {}, result.count);
+            log.warn('Scavenged orphaned process-local outbox rows', { count: result.count });
+        }
     }
 }
-
-export const outboxPublisher = new OutboxPublisher();
-
-

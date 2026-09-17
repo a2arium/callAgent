@@ -7,23 +7,39 @@ import { SessionManager } from './SessionManager.js';
 import { ApiBinder } from './api/ApiBinder.js';
 
 import { TaskExecutor, type LoopOpts } from './TaskExecutor.js';
-import type { InternalTaskContext } from '../loop/internalContext.js';
+import type { InternalTaskContext, OperatorTurnTraceCapture } from '../loop/internalContext.js';
 import type { ManifestProvenance } from '../types/turnTrace.js';
 import { InboxManager, EngineObservation } from './InboxManager.js';
 import { ArtifactHydrationService } from './ArtifactHydrationService.js';
 import { PluginManager } from '../plugin/pluginManager.js';
-import { AgentResultCache, hydrateArtifacts } from '@a2arium/callagent-memory-engine';
-import { eventBus } from '../eventbus/inMemoryEventBus.js';
-import { taskChannel } from '../eventbus/taskEventEmitter.js';
+import { AgentResultCache } from '@a2arium/callagent-memory-engine';
+import type { IEventBus } from '../public-types/eventbus/types.js';
+import { readDurableTaskTerminal } from './TaskLifecycle.js';
+import { currentTaskTurnClaim } from '../runtime/segmentProcessedKeys.js';
+import { assertCurrentTaskTurn } from './TaskTurnCoordinator.js';
 import { TaskStateUtils } from './utils/TaskStateUtils.js';
+import { prepareChildResultForPersistence } from './childResultPersistence.js';
+import { readLoopBudgetsFromSnapshotMeta } from './loopOptsFromSnapshotMeta.js';
 import { telemetry } from '../telemetry/TelemetryCollector.js';
 import { TurnNode } from '../telemetry/nodes/TurnNode.js';
 import { AgentNode } from '../telemetry/nodes/AgentNode.js';
+import { bindRuntimeCognitionStream } from '../streaming/cognitionRuntimePublisher.js';
+import { reconcileSnapshotMutation } from './persistence/SnapshotRepository.js';
+import { flushBufferedOperatorTurnEvents } from '../loop/loopRunner.js';
+import { defaultMetricsRegistry } from '../observability/metrics.js';
+import {
+    assertTaskReplyCapability,
+    extendContextWithStreaming,
+} from '../context/StreamingContext.js';
+import {
+    isTaskReplyStreaming,
+    readTaskReplyDeliveryMode,
+} from '../context/taskReplyDelivery.js';
 import * as uuid from 'uuid';
-const uuidv4 = uuid.v4;
+const uuidv7 = uuid.v7;
 
 // Re-export type for convenience
-export type TurnTrigger = 'start' | 'resume' | 'tool' | 'event';
+export type TurnTrigger = 'start' | 'resume' | 'tool' | 'event' | 'conversation';
 
 export interface TurnExecutionParams {
     tenantId: string;
@@ -37,6 +53,7 @@ export interface TurnExecutionParams {
     eventToken?: string;
     eventPayload?: unknown;
     eventType?: string;
+    throwOnSaveFailure?: boolean;
 }
 
 const log = logger.createLogger({ prefix: 'TurnRunner' });
@@ -45,7 +62,8 @@ export class TurnRunner {
     constructor(
         private sessionManager: SessionManager,
         private apiBinder: ApiBinder,
-        private getSessionStorePrisma: () => any
+        private getSessionStorePrisma: () => any,
+        private readonly eventBus: IEventBus
     ) { }
 
     /**
@@ -65,8 +83,8 @@ export class TurnRunner {
             snapshot?: Record<string, unknown>;
         }
     ): Promise<TaskEntity> {
-        const { tenantId, sessionId, trigger, isStreaming } = params;
-        console.log(`[TurnRunner] runTurn called: trigger=${trigger}, sessionId=${sessionId}, toolToken=${params.toolToken}`);
+        const { tenantId, sessionId, trigger, isStreaming: requestedStreaming } = params;
+        log.debug('runTurn called', { trigger, sessionId, toolToken: params.toolToken });
 
         // Telemetry state
         let turnNode: TurnNode | undefined;
@@ -79,11 +97,47 @@ export class TurnRunner {
             if (!snap && trigger !== 'start' && !overrides?.snapshot) {
                 throw new Error(`Session not found for ${sessionId}`);
             }
+            const admissionSnapshot = (snap?.snapshot ?? overrides?.snapshot) as Record<string, unknown> | undefined;
+            const admissionMeta = admissionSnapshot?.meta;
+            const coordinatorInitialized = admissionMeta !== null && typeof admissionMeta === 'object' &&
+                !Array.isArray(admissionMeta) &&
+                (admissionMeta as Record<string, unknown>).turnCoordinator !== undefined;
+            if (coordinatorInitialized) {
+                const claim = currentTaskTurnClaim();
+                if (claim === undefined || claim.tenantId !== tenantId || claim.taskId !== sessionId) {
+                    defaultMetricsRegistry.increment('task_turn_unfenced_execution_total', {
+                        operation: 'turn.run',
+                    });
+                    const error = new Error(
+                        `Task ${sessionId} cannot execute without its current fenced turn claim.`
+                    ) as Error & { code: string };
+                    error.name = 'TaskTurnUnfencedExecutionError';
+                    error.code = 'TASK_TURN_UNFENCED_EXECUTION';
+                    throw error;
+                }
+                assertCurrentTaskTurn(admissionSnapshot!, {
+                    tenantId,
+                    taskId: sessionId,
+                    claim,
+                    operation: 'turn.run',
+                });
+            }
 
             const base = overrides?.snapshot || (snap?.snapshot as Record<string, unknown>) || {};
+            const persistedReplyMode = readTaskReplyDeliveryMode(base);
+            const isStreaming = persistedReplyMode !== undefined
+                ? isTaskReplyStreaming(persistedReplyMode)
+                : requestedStreaming;
+            extendContextWithStreaming(ctx, isStreaming, this.eventBus);
 
             // 2. Prepare Mental State (M)
             let M: MentalState = overrides?.initialM || (base.M as MentalState) || initialM(ctx);
+            M = (ArtifactHydrationService.hydrateMentalStateArtifacts(
+                M,
+                this.getSessionStorePrisma(),
+                tenantId,
+                `turn.${trigger}`
+            ) as MentalState) || M;
             // Ensure ctx knows about M for syncing
             (ctx as any).M = M;
 
@@ -91,6 +145,7 @@ export class TurnRunner {
 
             // 4. Attach APIs and Flush Helper
             const flushMentalState = async () => {
+                const turnClaim = currentTaskTurnClaim();
                 const mutateFn = async (baseSnap: Record<string, unknown>) => {
                     // Inject LLM history into M before saving
                     try {
@@ -117,12 +172,28 @@ export class TurnRunner {
                     return { ...baseSnap, M };
                 };
 
-                await this.sessionManager.saveSnapshot({
+                await reconcileSnapshotMutation({
+                    session: this.sessionManager,
                     tenantId,
                     sessionId,
                     agentId: (ctx as any).agentId || 'default',
-                    expectedWmVersion: snap?.wmVersion ?? BigInt(0),
-                    snapshot: await mutateFn(base)
+                    operation: 'turn.flush',
+                    mutate: async ({ snapshot, storageNow }) => {
+                        if (turnClaim !== undefined) {
+                            assertCurrentTaskTurn(snapshot, {
+                                tenantId,
+                                taskId: sessionId,
+                                claim: turnClaim,
+                                operation: 'turn.flush',
+                                storageNow,
+                            });
+                        }
+                        return {
+                            kind: 'write',
+                            snapshot: await mutateFn(snapshot),
+                            value: undefined,
+                        };
+                    },
                 });
             };
 
@@ -132,11 +203,20 @@ export class TurnRunner {
                 agentId: (ctx as any).agentId || 'default',
                 flushMentalState
             });
+            try {
+                bindRuntimeCognitionStream({
+                    ctx,
+                    eventBus: this.eventBus,
+                    tenantId,
+                    sessionId,
+                    agentId: (ctx as any).agentId || 'default',
+                });
+            } catch { /* noop */ }
 
             // 5. Environment & Inbox Setup
             const startTurnTotal = Number((base as any)?.meta?.turn) || 0;
 
-            let envInbox = InboxManager.normalizeInbox((base as any)?.inbox);
+            let envInbox = InboxManager.normalizeInbox((base as { inbox?: unknown })?.inbox);
             // Hydrate
             envInbox = ArtifactHydrationService.hydrateInboxArtifacts(
                 envInbox,
@@ -144,7 +224,6 @@ export class TurnRunner {
                 tenantId,
                 trigger
             );
-
             // Inject initial input if present (start OR resume)
             if (trigger === 'start' && params.input) {
                 const inputObservation: EngineObservation = {
@@ -165,11 +244,34 @@ export class TurnRunner {
                 envInbox = InboxManager.addObservationToInbox(envInbox, inputObservation);
             }
 
+            // Restore telemetry from snapshot if missing, to survive process/async suspension boundaries
+            const persistedTelemetry = (base as { meta?: { telemetry?: { nodeId?: string; traceId?: string } } })?.meta
+                ?.telemetry;
+            if (persistedTelemetry && (persistedTelemetry.nodeId || persistedTelemetry.traceId)) {
+                if (!ctx.telemetry) {
+                    ctx.telemetry = {};
+                }
+                if (
+                    persistedTelemetry.nodeId != null &&
+                    persistedTelemetry.nodeId !== '' &&
+                    ctx.telemetry.nodeId == null
+                ) {
+                    ctx.telemetry.nodeId = persistedTelemetry.nodeId;
+                }
+                if (
+                    persistedTelemetry.traceId != null &&
+                    persistedTelemetry.traceId !== '' &&
+                    ctx.telemetry.traceId == null
+                ) {
+                    ctx.telemetry.traceId = persistedTelemetry.traceId;
+                }
+            }
+
             // --- TELEMETRY START ---
             try {
                 let parentId = ctx.telemetry?.nodeId;
                 if (!parentId) {
-                    const tempId = uuidv4();
+                    const tempId = uuidv7();
                     tempAgentNode = new AgentNode((ctx as any).agentId || 'unknown-agent', tempId, undefined, tempId);
                     tempAgentNode.start();
                     telemetry.registerNode(tempAgentNode);
@@ -183,6 +285,10 @@ export class TurnRunner {
                 prevNodeId = ctx.telemetry.nodeId;
                 if (parentId) {
                     ctx.telemetry.nodeId = parentId;
+                }
+                const parentTelNode = parentId ? telemetry.getNode(parentId) : undefined;
+                if (parentTelNode?.traceId && !ctx.telemetry.traceId) {
+                    ctx.telemetry.traceId = parentTelNode.traceId;
                 }
             } catch { }
             // -----------------------
@@ -199,45 +305,83 @@ export class TurnRunner {
                     pendingChildTokens.forEach(t => tokensToCheck.add(t));
 
                     if (tokensToCheck.size > 0) {
-                        const events = await this.sessionManager.listEventsSince({ tenantId, sessionId, sinceSeq: 0 });
-                        const childCompletedEvents = events.filter((e: any) => e.type === 'task.child_completed');
+                        const events = await this.sessionManager.listEventsSince({ tenantId, sessionId, sinceSeq: -1 });
+                        const childTerminalEvents = events.filter(
+                            (e: any) => e.type === 'task.child_completed' || e.type === 'task.child_failed'
+                        );
 
                         for (const token of tokensToCheck) {
-                            const completionEvent = childCompletedEvents.find((e: any) =>
+                            const terminalEvent = childTerminalEvents.find((e: any) =>
                                 (e.payload as any)?.token === token
                             );
 
-                            if (completionEvent) {
+                            if (terminalEvent) {
                                 const observationPredicate = (obs: EngineObservation) =>
-                                    obs?.kind === 'child.completed' &&
+                                    (obs?.kind === 'child.completed' || obs?.kind === 'child.failed') &&
                                     typeof obs === 'object' &&
                                     obs !== null &&
                                     (obs as any)?.payload &&
                                     (obs as any).payload.token === token;
 
-                                const childPrisma = this.getSessionStorePrisma();
-                                if (childPrisma) {
-                                    const p = (completionEvent.payload as any);
-                                    if (p?.result) {
-                                        const cache = new AgentResultCache(childPrisma);
-                                        p.result = hydrateArtifacts(p.result, cache, tenantId);
-                                    }
+                                const terminalPayload = (terminalEvent.payload as any) ?? {};
+                                if (terminalEvent.type === 'task.child_failed') {
+                                    const rawError = terminalPayload.error;
+                                    const errorRecord = rawError !== null && typeof rawError === 'object'
+                                        ? rawError as Record<string, unknown>
+                                        : {};
+                                    const error = {
+                                        code: typeof errorRecord.code === 'string' ? errorRecord.code : 'CHILD_FAILED',
+                                        message: typeof errorRecord.message === 'string'
+                                            ? errorRecord.message
+                                            : String(rawError ?? 'Child failed.'),
+                                        ...(typeof errorRecord.timeoutMs === 'number'
+                                            ? { timeoutMs: errorRecord.timeoutMs }
+                                            : {}),
+                                    };
+                                    const childObservation: EngineObservation = {
+                                        source: 'child',
+                                        kind: 'child.failed',
+                                        payload: {
+                                            token,
+                                            childTaskId: terminalPayload.childTaskId,
+                                            agentId: terminalPayload.agentId,
+                                            error,
+                                        },
+                                        provenance: {
+                                            ts: new Date(terminalEvent.createdAt).getTime(),
+                                            turn: startTurnTotal,
+                                            id: token,
+                                            correlationId: token,
+                                        },
+                                    };
+                                    envInbox = InboxManager.addObservationToInboxIfMissing(
+                                        envInbox,
+                                        childObservation,
+                                        observationPredicate
+                                    );
+                                    continue;
                                 }
-
-                                const completionResult = (completionEvent.payload as any)?.result;
+                                const completionResult = terminalPayload.result;
                                 const cleanChildResult = TaskStateUtils.extractCleanChildResult(completionResult);
+                                const childPrisma = this.getSessionStorePrisma();
+                                const cache = childPrisma ? new AgentResultCache(childPrisma) : undefined;
+                                const childResultForParent = await prepareChildResultForPersistence(
+                                    cleanChildResult.result,
+                                    cache,
+                                    tenantId
+                                );
                                 const childObservation: EngineObservation = {
                                     source: 'child',
                                     kind: 'child.completed',
                                     payload: {
                                         token,
-                                        childTaskId: cleanChildResult.childTaskId || (completionEvent.payload as any)?.childTaskId,
-                                        result: cleanChildResult.result,
-                                        agentId: (completionEvent.payload as any)?.agentId,
+                                        childTaskId: cleanChildResult.childTaskId || terminalPayload.childTaskId,
+                                        result: childResultForParent,
+                                        agentId: terminalPayload.agentId,
                                         executionMetadata: cleanChildResult.executionMetadata
                                     },
                                     provenance: {
-                                        ts: new Date(completionEvent.createdAt).getTime(),
+                                        ts: new Date(terminalEvent.createdAt).getTime(),
                                         turn: startTurnTotal, // Bug 1 Fix: Let loopRunner increment
                                         id: token,
                                         correlationId: token
@@ -276,20 +420,59 @@ export class TurnRunner {
             // Budgeting
             const agentId = (ctx as Record<string, unknown>).agentId as string | undefined;
             const plugin = agentId ? PluginManager.findAgent(agentId) : null;
+            const turnTrace = plugin?.resolved.runtimeManifest.observability?.turnTrace;
+            (ctx as InternalTaskContext).__operatorTurnTraceCapture = {
+                enabled: turnTrace?.enabled ?? true,
+                level: turnTrace?.level ?? 'summary',
+            } satisfies OperatorTurnTraceCapture;
             const moduleOverrides = (plugin as { loop?: { modules?: Record<string, unknown> } })?.loop?.modules || {};
 
             // Restore budgets
             let loopOpts: LoopOpts = {};
             try {
-                const persistedBudgets = (base as Record<string, unknown>)?.meta as { maxTurns?: number; latencyMs?: number } | undefined;
+                const persistedBudgets = readLoopBudgetsFromSnapshotMeta(
+                    (base as Record<string, unknown>)?.meta
+                );
                 const manifestBudgets = plugin?.resolved.runtimeManifest.budgets;
                 const hitl = plugin?.resolved.runtimeManifest.hitl;
-                if (hitl) { try { (M as Record<string, unknown>).hitl = hitl; } catch { } }
+                const communication = plugin?.resolved.runtimeManifest.communication;
 
-                if (persistedBudgets && typeof persistedBudgets.maxTurns === 'number') {
-                    loopOpts = persistedBudgets;
+                const topicSw = communication?.topicSweeper;
+                const topicSweeperResolved =
+                    topicSw &&
+                    typeof topicSw.intervalMs === 'number' &&
+                    topicSw.intervalMs > 0 &&
+                    typeof topicSw.autoArchiveAfterMs === 'number' &&
+                    topicSw.autoArchiveAfterMs > 0
+                        ? {
+                              intervalMs: topicSw.intervalMs,
+                              batchSize:
+                                  typeof topicSw.batchSize === 'number' && topicSw.batchSize > 0
+                                      ? topicSw.batchSize
+                                      : 100,
+                              autoArchiveAfterMs: topicSw.autoArchiveAfterMs,
+                          }
+                        : undefined;
+
+                if (persistedBudgets) {
+                    // Root task budgets are immutable once admitted, while newly
+                    // introduced provider-segment bounds may safely be adopted by
+                    // an already-running task after a compatible runtime upgrade.
+                    loopOpts = {
+                        ...manifestBudgets,
+                        ...persistedBudgets,
+                        segmentMaxTurns:
+                            persistedBudgets.segmentMaxTurns ?? manifestBudgets?.segmentMaxTurns,
+                        segmentLatencyMs:
+                            persistedBudgets.segmentLatencyMs ?? manifestBudgets?.segmentLatencyMs,
+                    };
                 } else if (manifestBudgets && typeof manifestBudgets === 'object') {
-                    loopOpts = { maxTurns: manifestBudgets.maxTurns, latencyMs: manifestBudgets.latencyMs };
+                    loopOpts = {
+                        maxTurns: manifestBudgets.maxTurns,
+                        latencyMs: manifestBudgets.latencyMs,
+                        segmentMaxTurns: manifestBudgets.segmentMaxTurns,
+                        segmentLatencyMs: manifestBudgets.segmentLatencyMs,
+                    };
                 } else {
                     log.warn('No budgets found in manifest or state for agent, using default 50 turns. Ensure agent.json is present and correctly matched if this is unexpected.', { agentId, sessionId });
                     loopOpts = { maxTurns: 50 };
@@ -298,6 +481,11 @@ export class TurnRunner {
                 if (typeof loopOpts.maxTurns === 'number') {
                     env.budget = { maxTurns: loopOpts.maxTurns, latencyMs: loopOpts.latencyMs ?? Infinity };
                 }
+                loopOpts.autoJoinInvitedTopics = communication?.autoJoinInvitedTopics === true;
+                if (topicSweeperResolved !== undefined) {
+                    loopOpts.topicSweeper = topicSweeperResolved;
+                }
+                if (hitl) loopOpts.hitl = hitl;
             } catch (err) {
                 // ignore
             }
@@ -305,24 +493,25 @@ export class TurnRunner {
             loopOpts.manifestProvenance = (ctx as InternalTaskContext).__manifestProvenance;
 
             // 6. Execute Turn
-            const { outcome, taskStatus } = await TaskExecutor.executeTurn({
+            assertTaskReplyCapability(ctx, {
+                eventBus: this.eventBus,
+                isStreaming,
+            });
+            const { outcome, taskStatus, persistence } = await TaskExecutor.executeTurn({
                 ctx, M, env, overrides: moduleOverrides, loopOpts,
                 sessionManager: this.sessionManager,
                 tenantId, sessionId, agentId: agentId || 'default',
                 isStreaming,
-                getSessionStorePrisma: this.getSessionStorePrisma
+                getSessionStorePrisma: this.getSessionStorePrisma,
+                eventBus: this.eventBus,
+                throwOnSaveFailure: params.throwOnSaveFailure === true
             });
-
             // explicit flush at end of turn (if not already flushed)
             if (this.sessionManager && !(ctx as any).__wmSavedThisTurn) {
                 try { await flushMentalState(); } catch (e) {
-                    // simplified error handling for now - duplicate of TaskEngine logic?
-                    // Ideally flushMentalState handles logic internally or throws specific errors.
-                    // TaskEngine had retry logic here.
-                    // TurnRunner's flushMentalState handles saveSnapshot.
-                    if ((e as Error).message === 'LIMIT_WM_SNAPSHOT_TOO_LARGE') {
-                        await this.sessionManager.appendEvent(tenantId, sessionId, 'wm.snapshot_limit', { size: 'unknown' });
-                    } else { throw e; }
+                    if ((e as Error).message !== 'LIMIT_WM_SNAPSHOT_TOO_LARGE') {
+                        throw e;
+                    }
                 }
             }
 
@@ -333,7 +522,11 @@ export class TurnRunner {
             // 1. Prefer taskStatus returned by TaskExecutor (contains Result/Artifacts)
             // 2. Fallback to results.status (from streaming buffer)
             // 3. Fallback to 'working'
-            const effectiveStatus = taskStatus || results.status || { state: 'working', timestamp: new Date().toISOString() };
+            const durableTerminal = persistence?.terminal ?? readDurableTaskTerminal(persistence?.snapshot);
+            const effectiveStatus = durableTerminal?.status ?? taskStatus ?? results.status ?? {
+                state: 'working',
+                timestamp: new Date().toISOString(),
+            };
 
             // Determine artifacts:
             // 1. Prefer taskStatus.metadata.result.artifacts (if present and array)
@@ -350,9 +543,17 @@ export class TurnRunner {
                 status: effectiveStatus,
                 artifacts: effectiveArtifacts
             };
+            Object.defineProperty(taskResult, '__turnPersistence', {
+                value: persistence,
+                enumerable: false,
+                configurable: false,
+            });
 
             // Map outcome validation to task status...
             if (outcome.kind === 'complete') {
+                if (durableTerminal !== undefined && durableTerminal.state !== 'completed') {
+                    return taskResult;
+                }
                 // Ensure state is completed (it should be from executor, but force if needed, preserving metadata)
                 if (taskResult.status && taskResult.status.state !== 'completed') {
                     taskResult.status = { ...taskResult.status, state: 'completed', timestamp: new Date().toISOString() };
@@ -360,21 +561,32 @@ export class TurnRunner {
                     taskResult.status = { state: 'completed', timestamp: new Date().toISOString() };
                 }
 
-                // Publish final event
-                try {
-                    eventBus.publish(taskChannel(sessionId), {
-                        id: sessionId,
-                        status: taskResult.status,
-                        final: true
-                    } as any);
-                } catch { }
             } else if (outcome.kind === 'fail') {
-                taskResult.status = { state: 'failed', timestamp: new Date().toISOString() };
+                if (durableTerminal !== undefined && durableTerminal.state !== 'failed') {
+                    return taskResult;
+                }
+                const failureReason = outcome.reason ?? outcome.error ?? 'failed';
+                taskResult.status = {
+                    ...taskResult.status,
+                    state: 'failed',
+                    timestamp: taskResult.status?.timestamp ?? new Date().toISOString(),
+                    message: taskResult.status?.message ?? {
+                        role: 'agent',
+                        parts: [{ type: 'text', text: `Loop failed: ${String(failureReason)}` }],
+                    },
+                    metadata: {
+                        ...(taskResult.status?.metadata ?? {}),
+                        reason: taskResult.status?.metadata?.reason ?? failureReason,
+                    },
+                };
             }
 
             return taskResult;
 
         } catch (error) {
+            if (currentTaskTurnClaim() !== undefined) {
+                await flushBufferedOperatorTurnEvents(ctx, 'superseded');
+            }
             log.error('TurnRunner error', { error });
             throw error;
         } finally {

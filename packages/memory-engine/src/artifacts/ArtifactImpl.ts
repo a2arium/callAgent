@@ -16,7 +16,8 @@ export class ArtifactImpl<T = unknown> implements ArtifactHandle<T> {
         private cache: AgentResultCache | Promise<AgentResultCache>,
         private tenantId: string,
         public mimeType?: string,
-        public estimatedSize?: number
+        public estimatedSize?: number,
+        private mutationGuard?: (operation: string) => void
     ) { }
 
     private async getCache(): Promise<AgentResultCache> {
@@ -27,25 +28,22 @@ export class ArtifactImpl<T = unknown> implements ArtifactHandle<T> {
     }
 
     async set(value: T): Promise<void> {
+        this.mutationGuard?.('artifact.set');
         if (!this.id) {
             this.id = uuidv4();
         }
 
         this._pendingWrite = (async () => {
             const cache = await this.getCache();
-            await cache.setCachedResult(
-                'artifact_store',
-                { artifactId: this.id! },
+            this.mutationGuard?.('artifact.set');
+            const stored = await cache.storeArtifact(
+                this.tenantId,
+                this.id,
                 value,
-                86400 * 30, // 30 days TTL
-                [],
-                this.tenantId
+                this.mimeType
             );
-            try {
-                this.estimatedSize = JSON.stringify(value).length;
-            } catch {
-                // ignore serialization errors for size estimation
-            }
+            this.id = stored.artifactId;
+            this.estimatedSize = stored.size;
         })();
 
         return this._pendingWrite;
@@ -110,4 +108,3 @@ export function isArtifactMarker(value: unknown): value is ArtifactMarker {
         typeof (value as ArtifactMarker).id === 'string'
     );
 }
-

@@ -1,0 +1,10 @@
+{
+  "workspaces": [
+    {
+      "name": "itupdated",
+      "root": "/Users/maximantonov/Work/_lab/itupdated",
+      "agentIndex": ".callagent/agent-paths.json",
+      "envFile": ".env"
+    }
+  ]
+}

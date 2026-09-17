@@ -1,0 +1,26 @@
+{
+  "name": "conversation-responder-agent",
+  "version": "0.1.0",
+  "description": "Companion responder for conversation-reference-agent.",
+  "supportedInterfaces": [
+    {
+      "url": "http://localhost:3000/a2a",
+      "protocolBinding": "JSONRPC",
+      "protocolVersion": "1.0"
+    }
+  ],
+  "capabilities": {
+    "streaming": false,
+    "pushNotifications": false
+  },
+  "defaultInputModes": ["text/plain"],
+  "defaultOutputModes": ["text/plain"],
+  "skills": [
+    {
+      "id": "conversation-reply",
+      "name": "Conversation reply",
+      "description": "Reads conversation message.received and acknowledges the thread."
+    }
+  ],
+  "url": "http://localhost:3000"
+}

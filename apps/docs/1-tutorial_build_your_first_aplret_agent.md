@@ -2,6 +2,10 @@
 
 This tutorial walks you through a minimal loop-mode agent using the APLRET model.
 
+For a long Execution step, commit the domain checkpoint and then call
+`await ctx.progress.report?.({ schemaVersion: 'run-progress-v1', phase: 'work', state: 'working' })`.
+The report is operational display state, not the checkpoint itself.
+
 ## What you will build
 
 A simple agent that:
@@ -30,6 +34,39 @@ You will also see the most important boundary rules in practice:
 - Policy is sync and M-only
 - Execution is the only effect boundary
 - Default manifest behavior and how to override it
+
+## Quick start: create an agent project (recommended)
+
+For most new agents, create an agent project and then customize its first agent.
+
+In your own project, install the framework packages first:
+
+```bash
+yarn add -D @a2arium/callagent-cli
+```
+
+Then create a project from your project root:
+
+```bash
+callagent create agent-project my-agents --with-agent my-agent
+```
+
+For non-trivial agents (flow map + normalizers + extra tests), switch the preset:
+
+```bash
+callagent create agent my-agent --project ./my-agents --preset non-trivial \
+  --uses-llm --uses-tools --uses-children --uses-plans
+```
+
+Then:
+
+1. `cd my-agents`
+2. `yarn install`
+3. `yarn build`
+4. `yarn test`
+5. Edit generated `types.ts` and modules for your domain behavior.
+
+The rest of this tutorial explains the manual minimal shape so you understand the generated files.
 
 ## Step 0: Create the manifests
 
@@ -89,6 +126,10 @@ Create `agent-runtime.json` in the repo root. This configures the runtime loops,
 ```
 
 *Note: Name and version must match the Agent Card.*
+
+### 0.3 Minimal source layout (canonical simple agent)
+
+This tutorial keeps everything in one module for learning. In a real repo, the **minimal layout** matches the contract’s simple-agent shape: small `agent.ts` (wiring), `types.ts`, and one file per module (`perception.ts`, `learning.ts`, `policy.ts`, `execution.ts`, `transition.ts`), plus `prompts.ts` / `contracts.ts` when prompts and schemas grow. See [APLRET contracts](./0-aplret_contracts.md) and [Agent repository layout](./14-agent_repository_layout_for_aplret.md).
 
 ## Step 1: Define your minimal observation and intent types
 
@@ -168,7 +209,7 @@ export const agent = createAgent<Sensory, Obs, unknown, Intent, unknown>({
       const handle = await ctx.requestInput(intent.prompt);
 
       return {
-        action: { kind: 'ask_user', token: handle.token },
+        action: { kind: 'prompt_user', token: handle.token },
         result: {
           status: 'ok',
           data: { promptRequested: true }
@@ -177,7 +218,9 @@ export const agent = createAgent<Sensory, Obs, unknown, Intent, unknown>({
     }
 
     if (intent.kind === 'answer_with_llm') {
-      const res = await ctx.llm.call(intent.query);
+      const res = await ctx.llm.call(intent.query, {
+        temperature: 0
+      });
       const text = res[0]?.content ?? 'Ok.';
 
       await ctx.reply(text);
@@ -200,8 +243,8 @@ export const agent = createAgent<Sensory, Obs, unknown, Intent, unknown>({
     };
   },
 
-  transition: (_env, exec) => {
-    if (exec.action.kind === 'ask_user') {
+  transition: (_env, exec, _m, _mem) => {
+    if (exec.action.kind === 'prompt_user') {
       return {
         kind: 'await_input',
         token: exec.action.token
@@ -304,6 +347,9 @@ Once this minimal agent works, the next guides to read are:
 - How-to: Keep Policy pure when the implementation wants to put too much there
 - How-to: Child-Agent Await and Resume (APLRET)
 - How-to: Use Artifacts Correctly (APLRET)
+- [How-to: Use manifest intent consent](./19-how_to_use_manifest_consent.md)
+
+When you add awaits, multiple branches, or structured LLM-driven control flow, adopt **`flow.md`** and the **non-trivial repository layout** as standard practice: [How-to: `flow.md` for APLRET agents](./13-flow_md_for_aplret_agents.md) and [How-to: Agent repository layout](./14-agent_repository_layout_for_aplret.md).
 
 ## What you built
 
@@ -316,4 +362,3 @@ You now have a minimal APLRET agent with the correct boundaries:
 - explicit Transition
 
 That is the correct foundation for adding tools, child agents, and larger memory patterns later.
-

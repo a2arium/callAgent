@@ -27,6 +27,15 @@ export class MLOSemanticBackend implements SemanticMemoryBackend {
         private taskContext?: any // Task context for automatic injection
     ) { }
 
+    get capabilities(): SemanticMemoryBackend['capabilities'] {
+        const capabilities = this.underlyingAdapter?.capabilities;
+        return capabilities ? { ...capabilities, backendKind: 'mlo' } : undefined;
+    }
+
+    get atomic(): SemanticMemoryBackend['atomic'] {
+        return this.underlyingAdapter?.atomic;
+    }
+
     async get<T>(key: string, opts?: { backend?: string }): Promise<T | null> {
         const result = await this.unifiedMemory.getSemanticMemory(key);
         return result as T | null;
@@ -148,4 +157,4 @@ export class MLOEmbedBackend implements EmbedMemoryBackend {
     async delete(key: string, opts?: { backend?: string }): Promise<void> {
         await this.unifiedMemory.deleteEmbedMemory(key);
     }
-} 
+}

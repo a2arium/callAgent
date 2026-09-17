@@ -26,6 +26,7 @@ export interface CleanChildResult {
         rewards?: unknown;
         state?: string;
         timestamp?: string;
+        origin?: 'cache';
     };
 }
 
@@ -39,6 +40,7 @@ export type StartTaskParams = {
     tenantId?: string;
     initialContext?: TaskContext; // use prebuilt context when provided
     parentTelemetryNodeId?: string; // Telemetry ID for sub-agent linking
+    skipTelemetryNodeCreation?: boolean; // Prevents taskEngine from wrapping execution in another AgentNode
     options?: {
         maxTurns?: number;
     };

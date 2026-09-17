@@ -1,5 +1,8 @@
 # A2A API Reference
 
+> Status: design draft.
+> API shapes here may evolve; verify stable contracts in `apps/docs/0-aplret_contracts.md`.
+
 ## Core Interfaces
 
 ### TaskContext.sendTaskToAgent
@@ -113,7 +116,7 @@ return {
 };
 
 // In transition module
-transition: (env, exec, M) => {
+transition: (env, exec, m, mem) => {
     if (exec.result.data?.awaitingFetch && exec.result.data?.token) {
         return {
             kind: 'await_child',

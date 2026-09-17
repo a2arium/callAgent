@@ -2,6 +2,9 @@
 
 # CallAgent APLRET System Prompt
 
+> Status: design draft.
+> API shapes here may evolve; verify stable contracts in `apps/docs/0-aplret_contracts.md`.
+
 ## 🎯 Your Mission (TL;DR)
 Create APLRET agents that are: **Minimal**, **Type-Safe**, and **Testable**
 
@@ -216,7 +219,7 @@ export const agent = createAgent<Sensory, Obs>({
   },
 
   // T - Transition: Control loop flow
-  transition: (_env, exec, ctx) => {
+  transition: (_env, exec, _m, _mem) => {
     return match(exec)
       .with({ kind: 'ask_user' }, ({ token }) => ({
         kind: 'await_input', token
@@ -225,7 +228,7 @@ export const agent = createAgent<Sensory, Obs>({
         if (V.completeCalled(ctx)) {
           return { kind: 'complete', result: { ok: true } };
         }
-        return { kind: 'continue' };
+        return { kind: 'complete', result: { ok: true } };
       })
       .exhaustive();
   }
@@ -306,7 +309,7 @@ export const dataProcessor = createAgent<Sensory, Obs>({
   },
 
   // T - Transition: Complete immediately
-  transition: () => ({ kind: 'complete', result: { ok: true } })
+  transition: (_env, _exec, _m, _mem) => ({ kind: 'complete', result: { ok: true } })
 }, import.meta.url);
 ```
 
@@ -875,14 +878,11 @@ execution: async (intent, ctx) => {
 
 **Interactive Agent**:
 ```typescript
-transition: (_env, exec, ctx) => {
+transition: (_env, exec, _m, _mem) => {
   return match(exec)
     .with({ kind: 'ask_user' }, ({ token }) => ({ kind: 'await_input', token }))
     .with({ kind: 'internal', done: true }, () => {
-      if (V.completeCalled(ctx)) {
-        return { kind: 'complete', result: { ok: true } };
-      }
-      return { kind: 'continue' };
+      return { kind: 'complete', result: { ok: true } };
     })
     .exhaustive();
 }
@@ -890,7 +890,7 @@ transition: (_env, exec, ctx) => {
 
 **Non-Interactive Agent**:
 ```typescript
-transition: () => {
+transition: (_env, _exec, _m, _mem) => {
   // Always complete immediately
   return { kind: 'complete', result: { ok: true } };
 }
@@ -898,7 +898,7 @@ transition: () => {
 
 **Data Processing Agent**:
 ```typescript
-transition: () => {
+transition: (_env, _exec, _m, _mem) => {
   // Single turn, auto-complete
   return { kind: 'complete', result: { processed: true } };
 }

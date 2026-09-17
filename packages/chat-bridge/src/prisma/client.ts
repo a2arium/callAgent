@@ -1,5 +1,5 @@
-import { PrismaClient } from '@chat-prisma/index.js';
-import type { PrismaClient as PrismaClientType } from '@chat-prisma/index.js';
+import { PrismaClient } from '../generated/prisma/index.js';
+import type { PrismaClient as PrismaClientType } from '../generated/prisma/index.js';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { getSafePgConfig } from '@a2arium/callagent-memory-sql';
 

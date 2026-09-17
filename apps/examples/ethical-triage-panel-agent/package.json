@@ -1,0 +1,24 @@
+{
+  "name": "@a2arium/ethical-triage-panel-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "exports": {
+    ".": "./dist/index.js",
+    "./moderator-agent": "./dist/moderator-agent.js",
+    "./persona-agent": "./dist/persona-agent.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && cp agent-runtime.json persona-agent-runtime.json dist/",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@a2arium/callagent-core": "workspace:*",
+    "@a2arium/callagent-types": "workspace:*",
+    "@a2arium/callagent-utils": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3"
+  }
+}

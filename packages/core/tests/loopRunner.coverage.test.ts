@@ -2,6 +2,7 @@ import { jest } from '@jest/globals';
 import { runLoop } from '../src/loop/loopRunner.js';
 import { initialM } from '../src/loop/init.js';
 import { normalizeObservationInbox, type EnvironmentState } from '../src/loop/types.js';
+import { EngineLocator } from '../src/orchestration/EngineLocator.js';
 
 const baseEnv = (overrides: Partial<EnvironmentState> = {}): EnvironmentState => ({
     time: new Date().toISOString(),
@@ -17,6 +18,7 @@ const baseEnv = (overrides: Partial<EnvironmentState> = {}): EnvironmentState =>
 afterEach(() => {
     jest.clearAllMocks();
     jest.restoreAllMocks();
+    EngineLocator.setEngine(null);
 });
 
 describe('runLoop memory wiring and defaults', () => {
@@ -28,6 +30,8 @@ describe('runLoop memory wiring and defaults', () => {
             set: jest.fn(),
             delete: jest.fn()
         };
+        const appendOperatorEvent = jest.fn(async () => ({ eventId: 'event-1', seq: 1 }));
+        EngineLocator.setEngine({ appendOperatorEvent });
 
         const ctx: any = { 
             task: { id: 'memory-task', input: 'hello' }, 
@@ -101,6 +105,15 @@ describe('runLoop memory wiring and defaults', () => {
         expect(result.M.goalState?.hierarchy?.nodes?.root?.status).toBe('done');
         expect(result.metrics?.timings?.length).toBeGreaterThan(0);
         expect(result.metrics?.rewards?.length).toBeGreaterThan(0);
+        expect(appendOperatorEvent).toHaveBeenCalledWith(expect.objectContaining({
+            type: 'memory.read',
+            payload: expect.objectContaining({
+                query: expect.objectContaining({ id: 'reg' }),
+                resultKeys: ['reg'],
+                resultCount: 1,
+                status: 'success',
+            }),
+        }));
 
         expect(env.inbox.current.length).toBe(0);
         expect(env.inbox.all.length).toBeGreaterThan(0);
@@ -146,6 +159,128 @@ describe('runLoop memory wiring and defaults', () => {
         expect(first.timings.totalMs).toBeGreaterThanOrEqual(0);
         expect(Array.isArray(first.inboxCurrent)).toBe(true);
         expect(first.pendingAfter).toBeDefined();
+        expect(first.conversation).toBeUndefined();
+    });
+
+    it('stamps incoming conversation messages into trace when present in inbox', async () => {
+        const ctx: any = {
+            task: { id: 'trace-conversation-task', input: 'x' },
+            reply: jest.fn(),
+            requestInput: jest.fn(),
+            sendTaskToAgent: jest.fn(),
+            requestTool: jest.fn(),
+            tools: { invoke: jest.fn() },
+        };
+        const M: any = initialM(ctx);
+        const env = baseEnv({
+            inbox: normalizeObservationInbox({
+                current: [{
+                    source: 'conversation',
+                    kind: 'message.received',
+                    payload: {
+                        kind: 'message.received',
+                        message: {
+                            id: 'msg-cov-1',
+                            conversation: { kind: 'thread', id: 'thread-cov-1' },
+                            senderAgentId: 'agent-parent',
+                            senderMemberId: 'agent-parent',
+                            recipientAgentId: 'agent-child',
+                            recipientMemberId: 'mem-child',
+                            speechAct: 'request',
+                            content: { task: 'x' },
+                            sequenceNumber: 1,
+                            ts: new Date().toISOString(),
+                        },
+                    },
+                }],
+                all: [],
+            }),
+        });
+        const modules = {
+            attention: () => ({}),
+            perception: () => ({ ok: true }),
+            learning: async (prev: any) => prev,
+            policy: () => ({ kind: 'internal', intent: 'noop' }),
+            shield: (_m: any, intent: any) => ({ action: 'pass', intent }),
+            execution: async (intent: any) => ({ action: intent, result: { status: 'ok', data: {} } }),
+            transition: () => ({ kind: 'complete' }),
+        };
+        const result = await runLoop(ctx, M, env, modules as any, { maxTurns: 1, collectTraces: true });
+        const trace = result.traces?.[0];
+        expect(trace?.conversation?.id).toBe('thread-cov-1');
+        expect(trace?.incomingMessages?.[0]?.id).toBe('msg-cov-1');
+        expect(trace?.messageSequenceNumber).toBe(1);
+    });
+
+    it('filters transition re-emit of consumed message.received and replaces with state.noted on continue', async () => {
+        const threadObs = {
+            source: 'conversation',
+            kind: 'message.received',
+            payload: {
+                kind: 'message.received',
+                message: {
+                    id: 'm-loop-dup',
+                    conversation: { kind: 'thread' as const, id: 'th-drain' },
+                    senderAgentId: 'o',
+                    senderMemberId: 'o',
+                    recipientAgentId: 'p',
+                    recipientMemberId: 'p',
+                    speechAct: 'inform' as const,
+                    content: {},
+                    sequenceNumber: 1,
+                    ts: new Date().toISOString(),
+                },
+            },
+        };
+        const reEmit: typeof threadObs = {
+            ...threadObs,
+            payload: {
+                ...threadObs.payload,
+                message: { ...threadObs.payload.message },
+            },
+        };
+        let turn = 0;
+        const ctx: Record<string, unknown> = {
+            task: { id: 'loop-drain-task', input: 'x' },
+            reply: jest.fn(),
+            requestInput: jest.fn(),
+            sendTaskToAgent: jest.fn(),
+            requestTool: jest.fn(),
+            tools: { invoke: jest.fn() },
+        };
+        const M: Record<string, unknown> = initialM(ctx);
+        const env = baseEnv({
+            inbox: normalizeObservationInbox({
+                current: [threadObs],
+                all: [threadObs],
+            }),
+        });
+        const modules = {
+            attention: () => ({}),
+            perception: () => ({ ok: true }),
+            learning: async (prev: unknown) => prev,
+            policy: () => ({ kind: 'internal', intent: 'noop' }),
+            shield: (_m: unknown, intent: unknown) => ({ action: 'pass', intent }),
+            execution: async (intent: unknown) => ({ action: intent, result: { status: 'ok', data: {} } }),
+            transition: () => {
+                if (turn === 0) {
+                    turn += 1;
+                    return { kind: 'continue', observations: [reEmit] };
+                }
+                return { kind: 'await_input', token: 'halt' };
+            },
+        };
+        const result = await runLoop(ctx, M, env, modules as never, { maxTurns: 2, collectTraces: true });
+        expect(turn).toBe(1);
+        expect(result.traces?.length).toBeGreaterThanOrEqual(2);
+        const second = result.traces?.[1];
+        expect(second?.inboxCurrent?.[0]?.kind).toBe('state.noted');
+        const nThreadInAll = env.inbox.all.filter(
+            (o) =>
+                (o as { source?: string; payload?: { kind?: string } }).source === 'conversation' &&
+                (o as { payload?: { kind?: string } }).payload?.kind === 'message.received'
+        );
+        expect(nThreadInAll.length).toBe(1);
     });
 });
 
@@ -262,7 +397,7 @@ describe('runLoop default execution and transitions', () => {
         expect(ctx.requestTool).toHaveBeenCalledWith('needs-callback', {}, expect.any(Object));
         expect(ctx.tools.invoke).toHaveBeenCalledTimes(2);
         expect(ctx.reply).toHaveBeenCalledWith('hello');
-        expect(transitionResults.map(t => t.kind)).toEqual(['await_input', 'await_child', 'await_child', 'await_child', 'await_tool', 'await_child']);
+        expect(transitionResults.map(t => t.kind)).toEqual(['await_input', 'await_child', 'continue', 'await_child', 'await_tool', 'await_child']);
         expect(result.outcome.kind).toBe('await_input');
     });
 });
@@ -297,6 +432,136 @@ describe('runLoop await_child fast-paths', () => {
         expect(env.pending.children['child-token']).toBeUndefined();
         expect(result.outcome.kind).toBe('await_tool');
         expect(env.inbox.current.length).toBe(0);
+    });
+
+    it('copies plan stamps onto childTerminals before SYNC pending delete', async () => {
+        const ctx: any = { task: { id: 'child-sync-stamp', input: {} }, reply: jest.fn() };
+        const M: any = initialM(ctx);
+        const childObs = { source: 'child', kind: 'child.completed', payload: { token: 'child-token', data: 'ok' } };
+        const env = baseEnv({
+            inbox: normalizeObservationInbox({ current: [], all: [childObs] }),
+            pending: {
+                inputs: {},
+                children: {
+                    'child-token': { agentId: 'child-agent', planId: 'p1', stepId: 'A', advanceCursor: true },
+                },
+                tools: {},
+                groups: {},
+            },
+        });
+
+        let call = 0;
+        const modules = {
+            attention: () => ({}),
+            perception: () => ({ inbox: env.inbox.current, time: env.time, pending: env.pending } as any),
+            learning: (prev: any) => { call += 1; return prev; },
+            policy: () => ({ kind: 'internal', intent: 'noop' } as any),
+            shield: (_m: any, intent: any) => ({ action: 'pass', intent } as any),
+            execution: () => ({ action: { kind: 'internal' }, result: { status: 'ok' } }),
+            transition: () => (call === 1
+                ? { kind: 'await_child', token: 'child-token' } as any
+                : { kind: 'await_input', token: 'end' } as any),
+            extrinsicReward: () => 0,
+            intrinsicReward: () => 0
+        };
+
+        const result = await runLoop(ctx, M, env, modules as any, { maxTurns: 2 });
+
+        expect(env.pending.children['child-token']).toBeUndefined();
+        expect(env.pending.childTerminals?.['child-token']).toEqual(
+            expect.objectContaining({ planId: 'p1', stepId: 'A', advanceCursor: true })
+        );
+        expect(result.outcome.kind).toBe('await_input');
+    });
+
+    it('copies plan stamps onto toolTerminals before SYNC pending delete', async () => {
+        const ctx: any = { task: { id: 'tool-sync-stamp', input: {} }, reply: jest.fn() };
+        const M: any = initialM(ctx);
+        const toolObs = {
+            source: 'tool',
+            kind: 'tool.completed',
+            payload: { token: 'tool-token', tool: 'search', result: {} },
+        };
+        const env = baseEnv({
+            inbox: normalizeObservationInbox({ current: [], all: [toolObs] }),
+            pending: {
+                inputs: {},
+                children: {},
+                tools: {
+                    'tool-token': { name: 'search', planId: 'p1', stepId: 'B', advanceCursor: false },
+                },
+                groups: {},
+            },
+        });
+
+        let call = 0;
+        const modules = {
+            attention: () => ({}),
+            perception: () => ({ inbox: env.inbox.current, time: env.time, pending: env.pending } as any),
+            learning: (prev: any) => { call += 1; return prev; },
+            policy: () => ({ kind: 'internal', intent: 'noop' } as any),
+            shield: (_m: any, intent: any) => ({ action: 'pass', intent } as any),
+            execution: () => ({ action: { kind: 'internal' }, result: { status: 'ok' } }),
+            transition: () => (call === 1
+                ? { kind: 'await_tool', token: 'tool-token' } as any
+                : { kind: 'await_input', token: 'end' } as any),
+            extrinsicReward: () => 0,
+            intrinsicReward: () => 0
+        };
+
+        const result = await runLoop(ctx, M, env, modules as any, { maxTurns: 2 });
+
+        expect(env.pending.tools['tool-token']).toBeUndefined();
+        expect(env.pending.toolTerminals?.['tool-token']).toEqual(
+            expect.objectContaining({ planId: 'p1', stepId: 'B', advanceCursor: false })
+        );
+        expect(result.outcome.kind).toBe('await_input');
+    });
+
+    it('does not overwrite existing toolTerminal stamps on SYNC delete', async () => {
+        const ctx: any = { task: { id: 'tool-sync-keep', input: {} }, reply: jest.fn() };
+        const M: any = initialM(ctx);
+        const toolObs = {
+            source: 'tool',
+            kind: 'tool.completed',
+            payload: { token: 'tool-token', tool: 'search', result: {} },
+        };
+        const env = baseEnv({
+            inbox: normalizeObservationInbox({ current: [], all: [toolObs] }),
+            pending: {
+                inputs: {},
+                children: {},
+                tools: {
+                    'tool-token': { name: 'search', planId: 'p-new', stepId: 'Z', advanceCursor: true },
+                },
+                toolTerminals: {
+                    'tool-token': { kind: 'completed', planId: 'p1', stepId: 'A', advanceCursor: false },
+                },
+                groups: {},
+            },
+        });
+
+        let call = 0;
+        const modules = {
+            attention: () => ({}),
+            perception: () => ({ inbox: env.inbox.current, time: env.time, pending: env.pending } as any),
+            learning: (prev: any) => { call += 1; return prev; },
+            policy: () => ({ kind: 'internal', intent: 'noop' } as any),
+            shield: (_m: any, intent: any) => ({ action: 'pass', intent } as any),
+            execution: () => ({ action: { kind: 'internal' }, result: { status: 'ok' } }),
+            transition: () => (call === 1
+                ? { kind: 'await_tool', token: 'tool-token' } as any
+                : { kind: 'await_input', token: 'end' } as any),
+            extrinsicReward: () => 0,
+            intrinsicReward: () => 0
+        };
+
+        await runLoop(ctx, M, env, modules as any, { maxTurns: 2 });
+
+        expect(env.pending.tools['tool-token']).toBeUndefined();
+        expect(env.pending.toolTerminals?.['tool-token']).toEqual(
+            expect.objectContaining({ kind: 'completed', planId: 'p1', stepId: 'A', advanceCursor: false })
+        );
     });
 
     it('reloads inbox from session manager when child completion is persisted externally', async () => {

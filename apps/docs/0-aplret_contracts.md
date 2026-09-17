@@ -6,6 +6,16 @@ Normative reference for loop-mode agents in the callagent framework.
 
 This document defines the stable contract for building APLRET agents. If a behavior is documented here, users and tools may depend on it.
 
+## Durable live progress
+
+Execution may call `ctx.progress.report()` with mandatory `schemaVersion`,
+`phase`, and `state`, plus optional summary, units, metrics, next work, and
+checkpoint identity. Reports are complete replacements, limited to 8 KiB, and
+accepted only while the caller's durable claim and fence are current. Report
+completed units after the authoritative domain checkpoint commits. Progress does
+not control lifecycle, retry, lease, or scheduling state. Existing
+`ctx.progress(...)` calls remain transient A2A status.
+
 ## Purpose
 
 APLRET is a turn-based agent architecture with explicit separation between:
@@ -22,6 +32,25 @@ Its goals are:
 - make effect boundaries explicit
 - make resume flows replayable and testable
 - make agent implementations predictable for humans and LLMs
+
+For operator-facing orchestration views, see [Operator Run Graph](./operator-run-graph.md). Hatchet workflow names are execution/debug vocabulary; users should see the semantic agent run DAG.
+
+## Getting started
+
+**New agents** should start with `@a2arium/callagent-cli` so manifests, `tsconfig`, module layout, and harness tests match the recommended structure. See [Tutorial: Build your first APLRET agent](./1-tutorial_build_your_first_aplret_agent.md). `scaffoldAgent` remains a programmatic core API for tooling.
+
+Simple scaffold examples (run from your project root):
+
+```bash
+# Minimal
+callagent create agent-project my-agents --with-agent my-agent
+
+# Non-trivial
+callagent create agent my-agent --project ./my-agents --preset non-trivial \
+  --uses-llm --uses-tools --uses-children --uses-plans
+```
+
+`--output` is resolved relative to your current working directory. See [Tutorial: Build your first APLRET agent](./1-tutorial_build_your_first_aplret_agent.md) for full options and follow-up steps.
 
 ## Core model
 
@@ -116,7 +145,7 @@ Execution always returns:
 
 ```ts
 export type ExecOutcome<Data = unknown, Err = unknown> = {
-  action: ExecAction;
+  action: ExecutableAction;
   result: ExecResult<Data, Err>;
 };
 ```
@@ -182,9 +211,9 @@ export type GoalId = string;
 export type PlanId = string;
 
 export type GoalStatus = 'active' | 'blocked' | 'done' | 'failed';
-export type PlanStatus = 'draft' | 'active' | 'stale' | 'completed' | 'failed';
-export type StepStatus = 'todo' | 'doing' | 'done' | 'failed' | 'skipped';
-export type StepKind = 'ask_user' | 'call_tool' | 'delegate_child' | 'llm' | 'internal';
+export type PlanStatus = 'proposed' | 'active' | 'stale' | 'completed' | 'failed' | 'cancelled';
+export type StepStatus = 'pending' | 'running' | 'completed' | 'failed' | 'skipped';
+export type StepKind = 'action' | 'subgoal' | 'internal';
 
 export type Goal = {
   id: GoalId;
@@ -198,25 +227,31 @@ export type Goal = {
   updatedAt: string;
 };
 
+/** Inferred from `PlanSchema` / `PlanStepSchema` in `@a2arium/callagent-core`. */
 export type PlanStep = {
   id: string;
+  kind: StepKind;
   goalId?: GoalId;
   title: string;
-  kind: StepKind;
-  args?: Record<string, unknown>;
-  dependsOn?: string[];
   status: StepStatus;
+  intent?: ExecutableStepIntent;
+  dependsOn?: string[];
+  outputs?: PlanOutputRef[];
+  validation?: ValidationState;
+  meta?: Record<string, PlanJsonValue>;
 };
 
 export type Plan = {
   id: PlanId;
   goalId?: GoalId;
-  status: PlanStatus;
   steps: PlanStep[];
   cursor: number;
+  status: PlanStatus;
   revision: number;
-  createdAt: string;
-  updatedAt: string;
+  lineage?: PlanRevisionLineage;
+  meta?: Record<string, PlanJsonValue>;
+  createdAt?: string;
+  updatedAt?: string;
 };
 
 export type MentalState<Sensory = unknown> = {
@@ -354,6 +389,7 @@ Recommended source taxonomy:
 - `child`
 - `internal`
 - `env`
+- `conversation`  
 
 ### Canonical source-kind taxonomy
 
@@ -381,6 +417,8 @@ Internal:
 - `internal / llm.responded`
 - `internal / plan.proposed`
 - `internal / plan.updated`
+- `internal / plan.step.updated`
+- `internal / plan.patch`
 - `internal / goal.updated`
 - `internal / validation.failed`
 
@@ -390,17 +428,48 @@ Env:
 - `env / clock.tick`
 - `env / snapshot.available`
 
+Conversation:
+
+- `conversation / message.received`
+- `conversation / delivery.failed`
+- `conversation / thread.closed` (includes TTL-driven close via `closedReason: 'ttl'` — there is no separate `thread.expired` kind)
+- `conversation / thread.archived`
+- `conversation / topic.message.received`
+- `conversation / topic.member.joined`
+- `conversation / topic.member.left`
+- `conversation / topic.invite.issued`
+- `conversation / topic.invite.received`
+- `conversation / topic.invite.accepted`
+- `conversation / topic.invite.declined`
+- `conversation / topic.invite.expired`
+- `conversation / topic.closed`
+- `conversation / outbound.committed`
+
 ### Taxonomy rules
 
 - each `source` must have a small finite set of supported `kind` values
 - invalid source-kind pairs must fail validation loudly
 - if a new kind becomes common, promote it into the shared taxonomy
 
+### Closed observation vocabulary (required shape)
+
+Perception output (`ObservationNormalized` / agent `Obs`) MUST be modeled as a **closed discriminated union**: each variant has a fixed `source`, `kind`, and typed `payload`.
+
+Anti-patterns (explicitly discouraged):
+
+- `kind: string` with open-ended values
+- `payload: any` or untyped `Record<string, unknown>` as the primary shape
+- mixing transport wrapper archaeology into the union instead of normalizing first
+
+**Source-specific normalizers** are the canonical Perception structure: route the inbox, then delegate to one normalizer per source family (e.g. `normalizers/user.ts`, `normalizers/tool.ts`) so transport quirks stay at the edge. See [How-to: Agent repository layout](./14-agent_repository_layout_for_aplret.md).
+
 ---
 
 ## ctx and working memory (runtime context)
 
 The framework may provide `ctx.*` namespaces. They MUST NOT create a second cognitive truth.
+
+See [How-to: Use memory in APLRET](./18-how_to_use_memory_in_aplret.md) for durable store rules, `MemoryReader` / `MemoryWriter`, and deprecated `ctx.*` surfaces.
 
 ### Authoritative cognition
 
@@ -506,6 +575,8 @@ type InternalObservation<T> = {
     | 'llm.responded'
     | 'plan.proposed'
     | 'plan.updated'
+    | 'plan.step.updated'
+    | 'plan.patch'
     | 'goal.updated'
     | 'validation.failed'
     | 'state.noted';
@@ -516,6 +587,8 @@ type InternalObservation<T> = {
   };
 };
 ```
+
+Plan observation payloads (`plan.proposed`, `plan.updated`, `plan.step.updated`, `plan.patch`) are the Plan or patch object itself, not `{ value: T }`.
 
 ### Env
 
@@ -546,6 +619,8 @@ type EnvObservation<T> = {
 ## Memory model
 
 `MentalState` stores cognition, not transport details.
+
+Full normative guide: [How-to: Use memory in APLRET](./18-how_to_use_memory_in_aplret.md) (canonical shapes, `MemoryReader` / `MemoryWriter`, durable store, and deprecated surfaces). Runtime types: `packages/core/src/loop/types.ts`.
 
 ### Memory placement table
 
@@ -624,6 +699,7 @@ Rules:
 - emits structured perception errors instead of throwing when possible
 - does not update `MentalState`
 - does not perform effects
+- SHOULD route through **source-specific normalizers** (one module or file per source family) instead of inlining all decoding in a single function
 
 ### Learning
 
@@ -632,16 +708,25 @@ Purpose: update cognition from normalized observations.
 Contract:
 
 ```ts
-learning(prevM, prevAction, observation, reward?) => M | Promise<M>
+learning(
+  prevM,
+  prevAction,
+  observation,
+  mem: MemoryReader,
+  writer: MemoryWriter,
+  reward?
+) => M | Promise<M>
 ```
 
 Rules:
 
 - only writer of `MentalState`
 - must return a new state
+- may use `mem` for async durable reads and `writer` for patches that merge into `M` and flush to the durable store (see [memory how-to](./18-how_to_use_memory_in_aplret.md))
 - may be async only to load artifacts or perform minimal cognition-related reads needed for the update
-- no external side effects
+- no external side effects (no direct `ctx.memory` calls from Learning module code)
 - should prefer compact, validated writes
+- SHOULD apply updates through **reducer-style** functions (e.g. `reducers.ts`) — one clear path per normalized observation kind — instead of long imperative mutation chains inline
 
 ### Policy
 
@@ -661,6 +746,7 @@ Rules:
 - no memory writes
 - no access to `env` or `ctx`
 - no artifact loading
+- SHOULD read **decision-ready views** from **selectors** (e.g. `readPolicyView(m)` in `selectors.ts`) rather than scattered deep reads into raw nested `MentalState`
 
 ### Shield
 
@@ -702,7 +788,7 @@ Canonical output:
 
 ```ts
 type ExecOutcome<Data = unknown, Err = unknown> = {
-  action: ExecAction;
+  action: ExecutableAction;
   result: ExecResult<Data, Err>;
 };
 ```
@@ -712,6 +798,14 @@ Rules:
 - only effect boundary
 - responsible for timeouts, bounded retries, idempotency keys, correlation ids
 - must not write `MentalState`
+- for non-trivial agents, SHOULD split implementation by concern:
+  - **LLM invocation** handlers under `effects/llm/`
+  - **prompt text / prompt builders** under `prompts/`
+  - **structured LLM output schemas** under `contracts/llm/`
+  - **tool invocation** under `effects/tools/`
+  - **tool argument/result schemas** under `contracts/tools/`
+
+See [How-to: Use LLMs in APLRET](./10-how_to_use_llm_in_aplret.md) and [How-to: Agent repository layout](./14-agent_repository_layout_for_aplret.md).
 
 ### Transition
 
@@ -720,7 +814,12 @@ Purpose: convert execution results into control flow and next-turn observations.
 Contract:
 
 ```ts
-transition(env, exec, m) => TurnOutcome
+transition(
+  env: EnvironmentState,
+  exec: ExecOutcome,
+  m: MentalState,
+  mem: MemoryReader
+) => TransitionOut
 ```
 
 Rules:
@@ -729,6 +828,116 @@ Rules:
 - no external side effects
 - must enforce await invariants
 - if `continue`, must include observations
+
+### Task lifecycle outcome versus domain outcome
+
+`TransitionOut` owns the durable task lifecycle. A successful Execution call is
+not, by itself, a successful task: Transition must decide whether the requested
+domain operation succeeded.
+
+| Situation | Result shape | Transition | Durable task status |
+| --- | --- | --- | --- |
+| Requested operation succeeded | `{ ok: true, ... }` | `complete` | `completed` |
+| Expected negative business outcome (for example, no matching records) | `{ ok: true, outcome: 'not_found', ... }` | `complete` | `completed` |
+| Requested operation failed (for example, a download timed out) | `{ ok: false, code, message }` | `fail` | `failed` |
+| More work or recovery is required | structured result/observation | `continue` or an explicit `await_*` | non-terminal |
+
+Do **not** return `complete` merely because Execution caught an exception and
+packaged it as data. That produces a technically completed task with a semantic
+failure/attention signal in Operator. For a terminal domain failure, preserve
+the structured error and fail explicitly:
+
+```ts
+const result = exec.result.data?.result;
+
+if (result && typeof result === 'object' && (result as { ok?: unknown }).ok === false) {
+  const failure = result as { code?: string; message?: string };
+  return {
+    kind: 'fail',
+    reason: failure.code ?? failure.message ?? 'operation_failed',
+    error: failure,
+  };
+}
+
+return { kind: 'complete', result };
+```
+
+Reserve `ok: false` for a real logical failure. If a negative result is still a
+valid completion, use an explicit successful outcome such as
+`{ ok: true, outcome: 'not_found' }`. Operator treats `result.ok === false` as
+a semantic failure by design.
+
+### Suspending the loop (`await_input` / `await_tool` / `await_child`)
+
+Runtime obligations may also suspend after Shield and before Execution. Manifest consent uses the same durable `await_input` token contract, but its receipt belongs to private `env.pending` control state—not MentalState—and its structured decision is normalized by the resume boundary. Policy must re-propose the exact approved intent; Execution must not parse raw approval input. See [manifest consent](./19-how_to_use_manifest_consent.md).
+
+`continue` is not a sleep mode. It must carry at least one observation; returning
+`{ kind: 'continue', observations: [] }` violates runtime invariants and triggers
+`CONTINUE_WITHOUT_OBSERVATIONS`.
+
+To pause and wait for future work, return one of the explicit await outcomes:
+
+- `{ kind: 'await_input', token }` when waiting for user input
+- `{ kind: 'await_tool', token }` when waiting for async tool completion
+- `{ kind: 'await_child', token }` when waiting for child completion
+
+`complete` is terminal for the task/turn outcome and should not be used as pause semantics.
+
+## Repository structure
+
+APLRET does not mandate a file tree for minimal agents, but **recommended structure** keeps the same concerns visible to humans and to AI-assisted editing. To generate that layout (manifests, modules, tests), use the scaffold in the [tutorial](./1-tutorial_build_your_first_aplret_agent.md).
+
+### Minimal layout (simple agents)
+
+Sufficient when normalization is light, effects are few, and procedural flow is easy to hold in one head:
+
+- `agent.ts` — wiring only (`createAgent({ ... })`)
+- `types.ts` — closed unions: `Obs`, `Intent`, execution payloads, stages
+- `attention.ts`, `perception.ts`, `learning.ts`, `policy.ts`, `shield.ts`, `execution.ts`, `transition.ts` as needed
+- `prompts.ts` / `contracts.ts` (or equivalent) when prompts and schemas stay small
+
+Rule: **grow structure when complexity grows**, not for symmetry.
+
+### Recommended layout (non-trivial agents)
+
+Use when any of the following apply: `await_input` / `await_tool` / `await_child`, multiple major branches, planning or repair loops, structured LLM outputs that steer control, or non-trivial failure paths.
+
+Additional or split locations:
+
+- `flow.md` — canonical **behavioral map** over time (required for non-trivial agents; see below)
+- `selectors.ts` — decision-ready views for Policy
+- `reducers.ts` — cognition writes from normalized observations
+- `normalizers/` — per-source inbox normalization (`user.ts`, `tool.ts`, `child.ts`, `internal.ts`, …)
+- `effects/llm/`, `effects/tools/` — named effect handlers
+- `prompts/` — wording and prompt builders
+- `contracts/llm/`, `contracts/tools/` — Zod/JSON schemas for structured outputs and tools
+
+Full guidance: [How-to: Agent repository layout](./14-agent_repository_layout_for_aplret.md).
+
+## `flow.md` behavioral map
+
+For **non-trivial agents**, the repository SHOULD include a **`flow.md`** file adjacent to `agent.ts` that explains **what the agent does over time**: main path, major branches, await/resume points, terminal outcomes, and a short code map.
+
+### When `flow.md` is required
+
+An agent SHOULD include `flow.md` when it uses any of:
+
+- `await_input`, `await_tool`, or `await_child`
+- multiple major branches
+- planning or repair loops driven by LLM or structured plans
+- structured LLM extraction that affects future decisions
+- non-trivial failure or recovery paths
+- behavior that is hard to explain without reading several modules
+
+Simple one-turn agents MAY omit `flow.md`.
+
+### Contract expectations
+
+- **Canonical section order** and content expectations are defined in [How-to: `flow.md` for APLRET agents](./13-flow_md_for_aplret_agents.md).
+- **Vocabulary in `flow.md`** (stages, observation kinds, intent kinds, execution result categories) SHOULD match **exact spellings** in `types.ts` and implementation.
+- **Behavior changes** that alter control flow, vocabulary, or terminal semantics SHOULD update `flow.md` in the **same change** (same PR) as the code.
+
+`flow.md` is behavioral documentation; **runtime truth remains code + tests**. It complements the contract and how-tos; it does not replace them.
 
 ---
 
@@ -752,6 +961,7 @@ type Intent =
   // Planning
   | { kind: 'create_plan'; goalId: string }
   | { kind: 'execute_next_step'; planId: string }
+  | { kind: 'execute_step'; planId: string; stepId: string }
   | { kind: 'repair_plan'; planId: string; reason: string }
 
   // Terminal / idle
@@ -765,6 +975,7 @@ Rules:
 - handle all cases exhaustively
 - new intent kinds require explicit changes to Policy, Shield, and Execution
 - intent kinds are internal API; do not expose them as A2A skills unless intentional
+- **Domain-named intents:** prefer a **single top-level `kind`** that expresses domain meaning (e.g. `start_fetch`, `complete_success`, `fail`) rather than generic wrappers such as `{ kind: 'internal'; subIntent: ... }` that hide the decision in nested fields. The intent union SHOULD be readable as a one-screen vocabulary.
 
 ### Stage
 
@@ -798,6 +1009,7 @@ Rules:
 - each await stage must have a corresponding token.
 - Any stage whose name begins with awaiting_ MUST declare a require: [...] token invariant (StageFacade) OR use the base await stage and the standard pending slot.
 - runtime should reject impossible combinations
+- if the agent maintains **`flow.md`**, the **Stages** subsection there SHOULD list the same stage names as the agent’s stage union / StageFacade configuration (exact spelling).
 
 **StageFacade** (`createStageFacade<St>({ stages, initial, ... })`) is the canonical API for stage management. The returned **`StageFacade<St>`** exposes:
 
@@ -866,10 +1078,10 @@ Planning computation is an effect. Plan state is cognition.
 
 * Policy emits `create_plan(goalId)` or `repair_plan(planId, reason)`
 * Shield checks budgets/policy
-* Execution calls the LLM to produce a structured plan object
-* Transition emits `internal/plan.proposed` or `internal/plan.updated`
-* Perception validates the plan schema
-* Learning writes the plan into `M.plans` (sets `activePlanId`, bumps `revision`, updates `cursor/status`)
+* Execution calls the LLM: create returns `data.planProposed` (a Plan); repair returns `data.planPatch` (`{ planId, patch }`)
+* Transition emits `internal/plan.proposed` (create) or `internal/plan.patch` (repair). `internal/plan.updated` remains a full Plan, not a patch.
+* Perception validates the plan / patch schema
+* Learning writes create into `M.plans` (sets `activePlanId`, bumps `revision`, updates `cursor/status`); repair applies `applyPlanPatch` and bumps `revision`
 * Next turn Policy emits `execute_next_step(planId)`
 
 ### LLM output contract requirements
@@ -890,18 +1102,69 @@ If the LLM output does not conform to the contract:
 - Transition MUST emit an observation that represents the failure.
 - Learning MUST write a durable fact that Policy can reason about (retry, repair, or ask user).
 
+#### Rule: bounded LLM operations use native execution controls
+
+`ctx.llm.call()` and `ctx.llm.stream()` accept optional `timeoutMs` and `signal` controls. `timeoutMs` starts once at public invocation and covers the complete logical operation, including provider dispatch, retry delays, structured-output validation, tool execution, chunk processing, usage callbacks, and final bookkeeping. Nested work MUST NOT reset the deadline.
+
+Completion, provider failure, timeout, and external abort race for exactly one caller-visible terminal outcome. Timeout is represented by `LLMTimeoutError` with `code = 'LLM_TIMEOUT'` and `timeoutMs`; external cancellation is represented by `LLMCancelledError` with `code = 'LLM_CANCELLED'`. Late provider outcomes are diagnostic only and MUST NOT mutate history, usage, telemetry, memory, or task state after timeout/cancellation wins.
+
+Execution SHOULD catch expected timeout/cancellation errors and return a structured `ExecResult` so Transition can emit a normal observation. A local `Promise.race()` is not a valid cancellation boundary because it does not revoke the underlying operation's delivery rights.
+
 #### Example (contracted output)
 
 ```ts
 const response = await ctx.llm.call(prompt, {
   data: simplifiedHtml,
-  jsonSchema: { name: 'ListingStructure', schema: listingContract }
+  jsonSchema: { name: 'ListingStructure', schema: listingContract },
+  timeoutMs: 60_000,
+  signal: cancellation.signal,
 });
 ```
 
 ### Notes
 
 * LLM calls MUST NOT be placed in Policy, Learning, Perception, Shield, or Transition.
+
+## Conversation usage model
+
+Conversation APIs are effects. They belong in Execution.
+
+### Rule
+
+Policy may decide to send or close conversation messages, but Policy never calls `ctx.conversation.*`.
+
+Use in Execution only:
+
+- `ctx.conversation.startThread(...)`
+- `ctx.conversation.send(...)`
+- `ctx.conversation.createTopic(...)`
+- `ctx.conversation.invite(...)`
+- `ctx.conversation.join(...)`
+- `ctx.conversation.decline(...)`
+- `ctx.conversation.leave(...)`
+- `ctx.conversation.post(...)`
+- `ctx.conversation.close(...)`
+- `ctx.conversation.archive(...)` (threads only; typed to `ThreadRef` so topics do not compile)
+
+**Thread lifecycle (Phase 3):** Closing emits `thread.closed` to both participants; optional `archiveAfter` on close may emit `thread.archived`. Idle TTL is configured via manifest (`communication.threadTtlMs`); expiry uses the same `thread.closed` observation with `closedReason: 'ttl'`. Policy may read `M.memory.conversation.threads[id]` (status, `closedReason`, `expiresAt`) without calling APIs.
+
+**Durable message log:** Framework wiring exposes a `MessageLog` port (Zod-typed, default DB-backed). Most agents use `ctx.conversation.*` only; custom `MessageLog` adapters are an advanced integration seam.
+
+Conversation outcomes affect reasoning only after they re-enter through the inbox pipeline as conversation observations.
+
+Topic identity model (Phase 2a):
+
+- `memberId` is the seat identity inside a topic.
+- `agentId` remains registry/routing identity.
+- `sessionId` is routing state identity (not logical member identity).
+- if `memberId` is omitted on input, runtime resolves `memberId = agentId` once and emits resolved values on all output/observations.
+
+Invite lifecycle model (Phase 2b):
+
+- invite capability is a branded `InviteToken`; callers MUST treat it as opaque and MUST NOT synthesize tokens.
+- inviter-facing seat projection keeps `pendingInvites`; invitee-facing inbox projection keeps `invitesInbox`.
+- delivery is two-step: `topic.invite.issued` (inviter seat) then `topic.invite.received` (invitee inbox/session).
+- terminal invite outcomes (`accepted`, `declined`, `expired`) remove the token from both projection surfaces.
 
 
 ---
@@ -964,7 +1227,7 @@ Child-agent dispatch is an effect. It belongs in Execution.
 
 1. Policy emits `delegate_to_child`
 2. Shield approves/blocks
-3. Execution calls `sendTaskToAgent(..., { awaitCompletion: false })`
+3. Execution calls `sendTaskToAgent(..., { awaitCompletion: false })` (Phase 3 onward this is implemented over `ctx.conversation` + A2A; `A2ACallOptions.timeout` is enforced)
 4. Execution extracts `handle.token` immediately as a primitive string
 5. Execution returns `{ action, result }` with `action.kind = 'child'` and the token
 6. Transition returns `await_child(token)`
@@ -973,6 +1236,17 @@ Child-agent dispatch is an effect. It belongs in Execution.
 9. Perception validates the child payload
 10. Learning writes a summarized child outcome into `MentalState`
 11. Policy decides the next intent
+
+When an asynchronous call configures `A2ACallOptions.timeout`, the deadline starts when
+`sendTaskToAgent` is invoked and is stored with the pending child. The deadline survives
+SQL-backed runtime restart. Completion and expiry atomically consume the same token, so
+exactly one terminal observation resumes the parent. Expiry emits `child.failed` with
+`error.code = 'CHILD_TIMEOUT'` and `error.timeoutMs`; a later child result is diagnostic
+only. Pending-child removal, the terminal tombstone, and the correlated inbox observation
+are one atomic snapshot mutation. Concurrent parent-turn persistence must reconcile against
+that snapshot and cannot resurrect a terminal child. If wake publication is interrupted,
+durable runtimes recover the same deterministic wake from the parent snapshot. The Hatchet
+missing-wake watchdog is separate and uses `CHILD_WAKE_TIMEOUT`.
 
 ### Inline child call (blocking)
 
@@ -1001,7 +1275,7 @@ Do not store entire transport wrappers if the framework already provides a norma
 If a child result completes a plan step:
 
 * Perception normalizes the completion
-* Learning marks the corresponding `M.plans.steps[stepId].status` as `done` or `failed`
+* Learning marks the corresponding `M.plans.steps[stepId].status` as `completed` or `failed`
 * Learning advances `cursor` when appropriate
 
 Policy remains small and reads only the updated `MentalState`.
@@ -1016,9 +1290,19 @@ Planning computation is an effect.
 Rules:
 
 - plan generation/repair via LLM/tool happens in Execution
-- plan changes enter through observations (`internal/plan.proposed`, `internal/plan.updated`)
-- Learning validates and writes plans into `MentalState.plans`
-- Policy remains small: create plan, execute next step, repair plan
+- plan changes enter through observations (`internal/plan.proposed`, `internal/plan.updated`, `internal/plan.step.updated`, `internal/plan.patch`)
+- Perception validates those payloads against `PlanSchema` / `PlanStepUpdatedPayloadSchema` / `PlanPatchSchema`; invalid plan observations become `internal/validation.failed` (they are not dropped)
+- Learning validates and writes plans into `MentalState.plans`. `applyPlanPatch` is Learning-owned; Policy does not apply patches. After ops, an explicit `set_cursor` past `steps.length` fails (`PLAN_CURSOR_OUT_OF_BOUNDS`); otherwise cursor is clamped, then the graph walk runs.
+- Policy remains small: create plan, execute next step, execute a named DAG step, repair plan
+- Sequential Policy uses `cursor` + `execute_next_step`. DAG Policy uses `selectReadyPlanSteps` / `selectBlockedPlanSteps` over `M.plans` (still only `M`; helpers are not a new APLRET phase) and emits **one** `execute_step { planId, stepId }` per turn. One intent per turn even when several steps are ready. Default Execution does **not** check `dependsOn`; naming a blocked pending step is a Policy bug. Default Learning correlates `pending.tools` / `children` / `inputs` tokens (stamped `planId` / `stepId` / `advanceCursor`) and applies `plan.step.updated`. Default readiness: a dependency is satisfied iff `status === 'completed'`. Opt-in `{ requireValidatedDependencies: true }` also requires `validation.status === 'valid'`.
+- Step results are compact `outputs` refs (`artifact | memory | evidence`), not inline blobs. `validation` is optional cognition (“downstream-usable”), not inbox schema-check. `lineage` explains a revision; when set, `parentRevision < revision`.
+- `validatePlanGraph` maps the same graph codes as `PlanSchema` (`PLAN_DEPENDENCY_MISSING`, `PLAN_DEPENDENCY_SELF`, `PLAN_DEPENDENCY_CYCLE`, `PLAN_DUPLICATE_STEP_ID`, `PLAN_CURSOR_OUT_OF_BOUNDS`) plus `PLAN_SCHEMA_INVALID`. Patch apply adds `PLAN_PATCH_REVISION_MISMATCH` and `PLAN_PATCH_INVALID`.
+- `PlanStep.kind` is structural (`action | subgoal | internal`). What to run is optional `intent` (`ExecutableStepIntent`). A step MUST NOT store `create_plan` / `execute_next_step` / `execute_step` / `repair_plan`.
+- `dependsOn` is a first-class graph field. Duplicate ids in one list are one edge. Missing / self / cycle targets are illegal.
+
+### Planning decisions
+
+Accepted decisions live in [`planning-harness/adr/`](./planning-harness/adr/) (`0001`–`0009`) and the matching specs in [`planning-harness/specs/README.md`](./planning-harness/specs/README.md). Those documents are the decision record (no `scheduling`, no `MentalState.extensions`, no output `kind: 'value'`). This contracts document is the author-facing APLRET surface. Do not copy ADR bodies here. The harness folder remains until a later deletion PR.
 
 ---
 
@@ -1080,14 +1364,39 @@ type TurnTrace = {
   toolCalls?: ToolCallTrace[];
   childCalls?: ChildCallTrace[];
 
+  // Optional compact telemetry (not cognition). Namespaced, versioned JSON. Dropped if invalid.
+  extensions?: Array<{ namespace: string; version: string; data: PlanJsonValue }>;
+
+  // Conversation metadata (optional, compact summary only)
+  conversation?: { id: string; kind: 'thread' | 'topic' };
+  incomingMessages?: ConversationMessageSummary[];
+  outgoingMessages?: ConversationMessageSummary[];
+  messageSequenceNumber?: number;
+  dedupeHit?: boolean;
+  deliveryLagMs?: number;
+  topicSelectorDecision?: {
+    kind: 'broadcast' | 'round_robin' | 'explicit_recipient';
+    resolvedMembers: Array<{ memberId: string; agentId: string }>;
+  };
+  fanoutSummary?: {
+    accepted: number;
+    rejected: number;
+    queued: number;
+    dedupeHits: number;
+  };
+
   // Error (if turn failed)
   error?: { code?: string; message: string; module?: FrameworkModule; detail?: JsonValue };
 };
 ```
 
+TurnTrace `extensions` are optional telemetry (`recordTurnTraceExtension`). They are not cognition and not inbox observations. Invalid items are dropped (the turn still succeeds). Agents MUST NOT use reserved prefixes `aplret.` / `callagent.`. There is no first-class `related`, `memoryReads`, or `DecisionTrace` field.
+
+Durable memory reads (`MemoryReader` / `mem.semantic.read`) are **not** new environment observations. Inbox is new evidence this turn; historical reads hydrate `M`. Operator `memory.read` events record keys/counts, not retrieved payloads.
+
 **Manifest provenance persistence/resume:** When TurnTrace is enabled, the runtime stores `ManifestProvenance` (agentCardSource, runtimeManifestSource, agentCardHash, runtimeManifestHash) on the task context and in snapshot meta. On resume, provenance is restored from snapshot so every TurnTrace carries the same provenance for the run. Identity (name/version) must match between Agent Card and Runtime Manifest or the loop will not start.
 
-**Child tracing:** Child-agent dispatch and completion are recorded in `TurnTrace.childCalls[]`. Parent/child traces are linked via `ChildCallNode` (telemetry node type `'child'`) and optional `parentTurnId` / `childTraceId` / `childAgentNodeId` in `ChildCallTrace`.
+**Child tracing:** Child-agent dispatch and completion are recorded in `TurnTrace.childCalls[]`. Parent/child traces are linked via `ChildCallNode` (telemetry node type `'child'`). In `ChildCallTrace`, `childTraceId` and `childAgentNodeId` are **normatively present on successful dispatch** (when telemetry allows) and **absent** on failure — see [`12-how_to_debug_with_turn_trace.md`](./12-how_to_debug_with_turn_trace.md).
 
 ### TurnTrace requirements
 
@@ -1099,6 +1408,7 @@ type TurnTrace = {
 - Include execution latency and cost metadata when available (`timings`, `usage`).
 - Include enough data to reconstruct why Policy chose its intent (`intent`, `perception`, `inboxCurrent`).
 - Sub-spans (LLM, tool, child) are logical children of the turn; child execution is linked via `ChildCallNode`.
+- Conversation fields (when present) must stay compact summaries; do not inline full message payload bodies or large artifacts.
 
 ### Correlation requirements
 
@@ -1145,7 +1455,7 @@ These invariants MUST be enforced by a combination of:
 | **Served Agent Card is resolved Agent Card** (`/.well-known/agent-card.json`)   |              no |            required | serving must not diverge from runtime resolution                     |
 | **TurnTrace includes manifest provenance when enabled**                         |              no |            required | `agentCardSource/runtimeManifestSource` + hashes                     |
 | **Goals and plans are written only by Learning**                                |         partial |            required | no direct cognition writes from `ctx.*`                              |
-| **Plan invariants**: `cursor` in bounds, `revision` monotonic                   |         partial |            required | validate on Learning write                                           |
+| **Plan invariants**: unique step ids; `dependsOn` targets exist; no self-edge; no cycle; `cursor` in `0..steps.length`; `revision` monotonic |         partial |            required | `PlanSchema` parse + Learning write; invalid plan observations → `internal/validation.failed` |
 | **Structured LLM output uses output contract**                                  |         partial |            required | require zod/jsonSchema in `ctx.llm.call` when not free text          |
 | **Structured tool/child results are validated before Learning writes facts**    |         partial |            required | Perception validates schema/type guards                              |
 
@@ -1292,7 +1602,7 @@ If the agent uses `M.plans`, it MUST include tests for:
 
 * create plan flow (`internal/plan.proposed` enters inbox; Learning writes `M.plans.activePlanId`)
 * execute next step flow (cursor advances only after completion re-enters via inbox)
-* repair plan flow (`internal/plan.updated`; `revision` increments; plan returns to `active`)
+* repair plan flow (`internal/plan.patch`; `revision` increments; plan returns to `active`)
 
 ### Recommended harness shape
 
@@ -1432,6 +1742,34 @@ Users should not depend on these unless the framework explicitly promotes them:
 * temporary compatibility shims
 * transport-specific wrapper details before normalization
 
+### Documented legacy and sugar (time-boxed)
+
+Until removed in a dedicated change (with migration), the following are **intentional** exceptions to a strict “no compatibility surface” reading:
+
+* Runtime manifest **`runMode: 'legacy'`** when still present — see the manifest spec for semantics and removal plan.
+* **`createAgent` top-level module sugar** — the same functions may be passed as `attention`, `perception`, …, or under `loop.modules`; both paths are supported and typed against `Modules<…>`.
+
+### Public API inventory (single source of truth)
+
+The table below lists **stable or experimental exports** authors and integrators should treat as the framework’s public contract from npm packages. It is maintained alongside changes to `packages/core/src/index.ts` and `packages/types/src/index.ts`. Internal modules under `packages/core/src/**` that are not re-exported here are not supported API.
+
+| Symbol / group | Package | Stability | Notes |
+|----------------|---------|-----------|--------|
+| `createAgent`, `AgentPlugin`, `CreateAgentPluginOptions` | `@a2arium/callagent-core` | stable | Manifest resolution + optional `loop` / top-level module sugar |
+| `TaskContext`, `AgentTaskContext`, `ensureAgentContext` | `@a2arium/callagent-core` | stable | Context passed to agents; use `ensureAgentContext` when narrowing |
+| `TaskContextGoalAddInput`, `TaskContextGoalUpdatePatch`, `TaskContextGoalsReadFilter` | `@a2arium/callagent-core` | stable | Shapes for `ctx.goals.*` when present |
+| Input guards: `isChildCompletionInput`, `isToolCompletionInput`, `isDirectInput`, `isExternalEventInput` | `@a2arium/callagent-core` | stable | Discriminators for resume / external payloads |
+| Loop: `Modules`, `runLoop`, `MentalState`, `EnvironmentState`, `Observation`, `Intent`, `ExecOutcome`, `TurnOutcome`, … | `@a2arium/callagent-core` | stable | See barrel for full type exports |
+| Stage facade: `createStageFacade`, `StageFacade`, `defineControlKeys`, control var accessors | `@a2arium/callagent-core` | stable | |
+| `createTestHarness`, `TestHarness`, deterministic stubs, harness assertion helpers | `@a2arium/callagent-core` | stable | Same `Partial<Modules>` shape as `createAgent` |
+| Planning: `PlanSchema`, `PlanPatchSchema`, `validatePlanGraph`, `selectReadyPlanSteps`, `selectBlockedPlanSteps`, `resolveStoredPlanStep`, `applyPlanPatch`, `recordTurnTraceExtension`; harness `snapshot()` / `fork()` | `@a2arium/callagent-core` | stable | One Plan truth (`.strict()`); graph helpers ignore `cursor`; Learning owns patch apply; `recordTurnTraceExtension` is Execution-only (`ctx`). `snapshot`/`fork` isolate harness branches. No `scheduling`, no `MentalState.extensions`, no output `kind: 'value'`. |
+| `scaffoldAgent`, `formatScaffoldError`, `ScaffoldOptionsSchema`, `ScaffoldOptions`, `ScaffoldResult`, `ScaffoldFailure`, `AgentPreset` | `@a2arium/callagent-core` | stable | Programmatic scaffolding API; use `@a2arium/callagent-cli` for supported creation commands. |
+| Orchestration: `TaskEngine`, `A2AService`, registries, tenant helpers | `@a2arium/callagent-core` | stable / advanced | Prefer documented entrypoints for new agents |
+| Manifests: `AgentCard`, `AgentRuntimeManifest`, `ResolvedManifests`, manifest errors | `@a2arium/callagent-types` (+ re-exports from core) | stable | Zod-backed sources of truth in `callagent-types` |
+| Semantic / working memory types (`IMemory`, semantic filters, …) | `@a2arium/callagent-types` | stable | |
+
+**Rules for contributors:** new or renamed **exported** symbols require an inventory row (or explicit “experimental” marking), type-level tests where applicable (`tsd` / export tests per [types-rules](./todo/types-rules.md)), and a migration note in `apps/docs/migration/` when the change is author-visible.
+
 ### Rule for examples
 
 Reference examples MUST use only stable public surface.
@@ -1559,7 +1897,7 @@ export const agent = createAgent<Sensory, Obs, unknown, Intent, unknown>({
     };
   },
 
-  transition: (_env, exec) => {
+  transition: (_env, exec, _m, _mem) => {
     if (exec.action.kind === 'ask_user') {
       return {
         kind: 'await_input',
@@ -1590,6 +1928,10 @@ Prefer:
 - one canonical path for each task
 - explicit invariants
 - structured telemetry
+- **closed** observation and intent discriminated unions; **domain-named** intent kinds
+- **selector-driven** Policy and **reducer-driven** Learning
+- **`flow.md`** for non-trivial agents, kept in sync with behavior
+- **normalizers** at the Perception edge; **named** effect handlers and separated **prompts/** / **contracts/** for LLM-heavy agents
 
 Avoid:
 
@@ -1599,6 +1941,10 @@ Avoid:
 - storing raw large payloads in memory
 - mixing cognition with control
 - multiple equivalent public patterns for the same job
+- stringly-typed observation vocabularies (`kind: string`, untyped payloads)
+- deep ad hoc reads of `MentalState` inside Policy instead of selectors
+- long imperative mutation chains in Learning instead of reducers
+- prompt strings and schema definitions buried inside execution handlers when they have grown non-trivial
+- letting **`flow.md`** drift from code after behavior changes
 
 A stable framework gives users less ambiguity, not more.
-

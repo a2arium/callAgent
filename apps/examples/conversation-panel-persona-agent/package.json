@@ -1,0 +1,22 @@
+{
+  "name": "@a2arium/conversation-panel-persona-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/agent.js",
+  "exports": {
+    ".": "./dist/agent.js",
+    "./constants": "./dist/constants.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && cp agent-card.json agent-runtime.json dist/"
+  },
+  "dependencies": {
+    "@a2arium/callagent-core": "workspace:*",
+    "@a2arium/callagent-types": "workspace:*",
+    "@a2arium/callagent-utils": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3"
+  }
+}

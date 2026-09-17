@@ -35,21 +35,411 @@ model AgentResultCache {
   result    Json
   createdAt DateTime @default(now()) @map("created_at")
   expiresAt DateTime @map("expires_at")
+  artifactReferences ArtifactReference[]
 
   @@unique([tenantId, agentName, cacheKey])
   @@index([tenantId, agentName])
   @@index([expiresAt])
+  @@index([tenantId, expiresAt])
   @@map("agent_result_cache")
 }
 
+model ArtifactReference {
+  tenantId     String   @map("tenant_id")
+  artifactId   String   @map("artifact_id")
+  ownerId      String   @map("owner_id")
+  cacheEntryId String   @map("cache_entry_id")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+  cacheEntry   AgentResultCache @relation(fields: [cacheEntryId], references: [id], onDelete: Cascade)
+
+  @@id([tenantId, artifactId, ownerId])
+  @@index([tenantId, ownerId])
+  @@index([cacheEntryId])
+  @@map("artifact_references")
+}
+
+model MaintenanceLease {
+  tenantId String @map("tenant_id")
+  key String
+  holderId String @map("holder_id")
+  leaseUntil DateTime @map("lease_until")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@id([tenantId, key])
+  @@index([leaseUntil])
+  @@map("maintenance_leases")
+}
+
+// Cross-process worker readiness. The API host reads this lease instead of
+// assuming that successful schedule REST calls imply a usable durable stream.
+model RuntimeWorkerHealth {
+  tenantId       String   @map("tenant_id")
+  installationId String   @map("installation_id")
+  instanceId     String   @map("instance_id")
+  workerName     String   @map("worker_name")
+  state          String
+  generation     Int      @default(1)
+  workflowHash   String   @map("workflow_hash")
+  observedAt     DateTime @map("observed_at")
+  heartbeatAt    DateTime? @map("heartbeat_at")
+  leaseUntil     DateTime @map("lease_until")
+  errorCode      String?  @map("error_code")
+  errorMessage   String?  @map("error_message")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  @@id([tenantId, installationId, instanceId])
+  @@index([tenantId, installationId, leaseUntil])
+  @@map("runtime_worker_health")
+}
+
 model Outbox {
-  id        String   @id @default(cuid())
-  tenantId  String   @map("tenant_id")
-  topic     String
-  key       String
-  payload   Json
-  createdAt DateTime @default(now()) @map("created_at")
+  id         String   @id @default(cuid())
+  tenantId   String   @map("tenant_id")
+  topic      String
+  key        String
+  payload    Json
+  idempotencyKey String? @unique @map("idempotency_key")
+  deliveryScope String? @map("delivery_scope")
+  deliveryOwnerId String? @map("delivery_owner_id")
+  dispatchLeaseId String? @map("dispatch_lease_id")
+  dispatchLeaseUntil DateTime? @db.Timestamptz(3) @map("dispatch_lease_until")
+  retryCount Int      @default(0) @map("retry_count")
+  createdAt  DateTime @default(now()) @map("created_at")
 
   @@index([tenantId, topic])
+  @@index([deliveryScope, createdAt])
   @@map("outbox")
+}
+
+model DriverRun {
+  id                String   @id @default(cuid())
+  provider          String   @default("hatchet")
+  providerRunId     String?  @unique @map("provider_run_id")
+  providerTaskRunId String?  @map("provider_task_run_id")
+  tenantId          String   @map("tenant_id")
+  agentId           String?  @map("agent_id")
+  taskId            String?  @map("task_id")
+  token             String?
+  traceId           String?  @map("trace_id")
+  spanId            String?  @map("span_id")
+  idempotencyKey    String?  @map("idempotency_key")
+  operation         String
+  status            String
+  outboxRowId       String?  @map("outbox_row_id")
+  rootTaskId        String?  @map("root_task_id")
+  parentTaskId      String?  @map("parent_task_id")
+  parentAgentId     String?  @map("parent_agent_id")
+  childTaskId       String?  @map("child_task_id")
+  childAgentId      String?  @map("child_agent_id")
+  edgeToken         String?  @map("edge_token")
+  edgeKind          String?  @map("edge_kind")
+  turnSeq           Int?     @map("turn_seq")
+  boundaryKind      String?  @map("boundary_kind")
+  turnTraceId       String?  @map("turn_trace_id")
+  claimId           String?  @map("claim_id")
+  turnFence         String?  @map("turn_fence")
+  claimedGeneration String?  @map("claimed_generation")
+  turnDisposition   String?  @map("turn_disposition")
+  attemptSeq        Int?     @map("attempt_seq")
+  rootRunKey        String?  @map("root_run_key")
+  error             Json?
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  @@index([tenantId, taskId])
+  @@index([tenantId, rootTaskId])
+  @@index([tenantId, taskId, status])
+  @@index([tenantId, rootTaskId, status])
+  @@index([tenantId, taskId, createdAt, id])
+  @@index([tenantId, operation, status, updatedAt, id])
+  @@map("driver_runs")
+}
+
+model RuntimeTimer {
+  id                String    @id @default(cuid())
+  tenantId          String    @map("tenant_id")
+  taskId            String    @map("task_id")
+  agentId           String?   @map("agent_id")
+  rootTaskId        String?   @map("root_task_id")
+  token             String
+  timerId           String    @map("timer_id")
+  dueAt             DateTime  @map("due_at")
+  kind              String
+  status            String
+  idempotencyKey    String    @unique @map("idempotency_key")
+  fireLeaseId       String?   @map("fire_lease_id")
+  fireLeaseUntil    DateTime? @map("fire_lease_until")
+  payload           Json?
+  providerRunId     String?   @map("provider_run_id")
+  providerTaskRunId String?   @map("provider_task_run_id")
+  error             Json?
+  firedAt           DateTime? @map("fired_at")
+  canceledAt        DateTime? @map("canceled_at")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
+
+  @@unique([tenantId, taskId, token, timerId])
+  @@index([tenantId, status, dueAt, timerId])
+  @@index([tenantId, taskId, token])
+  @@map("runtime_timers")
+}
+
+model AgentRun {
+  id              String   @id @default(cuid())
+  tenantId        String   @map("tenant_id")
+  taskId          String   @map("task_id")
+  rootTaskId      String   @map("root_task_id")
+  agentId         String?  @map("agent_id")
+  operation       String   @default("agent.run")
+  scope           String
+  status          String
+  attention       String?
+  parentTaskId    String?  @map("parent_task_id")
+  parentAgentId   String?  @map("parent_agent_id")
+  parentTurnSeq   Int?     @map("parent_turn_seq")
+  childCount      Int      @default(0) @map("child_count")
+  turnCount       Int      @default(0) @map("turn_count")
+  logicalTurnCount Int?    @map("logical_turn_count")
+  llmCallCount    Int      @default(0) @map("llm_call_count")
+  memoryOpCount   Int      @default(0) @map("memory_op_count")
+  knownCostUsd    Decimal? @map("known_cost_usd") @db.Decimal(18, 6)
+  startedAt       DateTime? @map("started_at")
+  terminalAt      DateTime? @map("terminal_at")
+  durationMs      Int?     @map("duration_ms")
+  lastBoundaryKind String? @map("last_boundary_kind")
+  waitingReason   String? @map("waiting_reason")
+  terminalCode    String? @map("terminal_code")
+  terminalMessage String? @map("terminal_message")
+  cancelReason    String? @map("cancel_reason")
+  outputState     String  @default("not_captured") @map("output_state")
+  outputArtifactId String? @map("output_artifact_id")
+  traceId         String? @map("trace_id")
+  providerRunId   String? @map("provider_run_id")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@unique([tenantId, taskId])
+  @@index([tenantId, rootTaskId])
+  @@index([tenantId, updatedAt, id])
+  @@index([tenantId, scope, updatedAt, taskId])
+  @@index([tenantId, agentId, updatedAt, taskId])
+  @@index([tenantId, status, updatedAt, taskId])
+  @@map("agent_runs")
+}
+
+model RunProgress {
+    tenantId String @map("tenant_id")
+    taskId String @map("task_id")
+    rootTaskId String @map("root_task_id")
+    agentId String @map("agent_id")
+    schemaVersion String @map("schema_version")
+    snapshot Json
+    revision BigInt @default(1)
+    claimId String @map("claim_id")
+    turnFence String @map("turn_fence")
+    claimedGeneration String @map("claimed_generation")
+    turnSeq Int @map("turn_seq")
+    reportedAt DateTime @map("reported_at") @db.Timestamptz(3)
+    terminalState String? @map("terminal_state")
+    terminalAt DateTime? @map("terminal_at") @db.Timestamptz(3)
+    createdAt DateTime @default(now()) @map("created_at")
+    updatedAt DateTime @updatedAt @map("updated_at")
+
+    @@id([tenantId, taskId])
+    @@index([tenantId, rootTaskId, updatedAt])
+    @@map("run_progress")
+}
+
+model AgentRunEdge {
+  id              String   @id @default(cuid())
+  tenantId        String   @map("tenant_id")
+  rootTaskId      String   @map("root_task_id")
+  parentTaskId    String   @map("parent_task_id")
+  childTaskId     String   @map("child_task_id")
+  parentTurnSeq   Int?     @map("parent_turn_seq")
+  token           String   @default("")
+  edgeKind        String   @default("delegates_to") @map("edge_kind")
+  status          String
+  terminalCode    String?  @map("terminal_code")
+  terminalMessage String?  @map("terminal_message")
+  createdAt       DateTime @default(now()) @map("created_at")
+  resolvedAt      DateTime? @map("resolved_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@unique([tenantId, parentTaskId, childTaskId, token])
+  @@index([tenantId, rootTaskId, parentTaskId])
+  @@index([tenantId, childTaskId])
+  @@map("agent_run_edges")
+}
+
+model TurnRun {
+  id              String   @id @default(cuid())
+  tenantId        String   @map("tenant_id")
+  taskId          String   @map("task_id")
+  rootTaskId      String   @map("root_task_id")
+  agentId         String?  @map("agent_id")
+  turnSeq         Int?     @map("turn_seq")
+  attemptKey      String   @map("attempt_key")
+  attemptSeq      Int?     @map("attempt_seq")
+  disposition     String?
+  claimId         String?  @map("claim_id")
+  turnFence       String?  @map("turn_fence")
+  claimedGeneration String? @map("claimed_generation")
+  authoritativeTerminal Boolean @default(false) @map("authoritative_terminal")
+  status          String
+  startedAt       DateTime? @map("started_at")
+  completedAt     DateTime? @map("completed_at")
+  durationMs      Int?     @map("duration_ms")
+  fromState       String?  @map("from_state")
+  toState         String?  @map("to_state")
+  transitionKind  String?  @map("transition_kind")
+  boundaryKind    String?  @map("boundary_kind")
+  shieldOutcome   String?  @map("shield_outcome")
+  executionKind   String?  @map("execution_kind")
+  outputProduced  Boolean  @default(false) @map("output_produced")
+  llmCallCount    Int      @default(0) @map("llm_call_count")
+  memoryOpCount   Int      @default(0) @map("memory_op_count")
+  knownCostUsd    Decimal? @map("known_cost_usd") @db.Decimal(18, 6)
+  terminalCode    String?  @map("terminal_code")
+  terminalMessage String?  @map("terminal_message")
+  turnTraceId     String?  @map("turn_trace_id")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@unique([tenantId, taskId, attemptKey])
+  @@index([tenantId, taskId, turnSeq])
+  @@index([tenantId, taskId, turnSeq, id])
+  @@index([tenantId, rootTaskId, taskId, turnSeq])
+  @@map("turn_runs")
+}
+
+model CognitiveTurnRun {
+  id                 String   @id @default(cuid())
+  tenantId           String   @map("tenant_id")
+  taskId             String   @map("task_id")
+  rootTaskId         String   @map("root_task_id")
+  agentId            String?  @map("agent_id")
+  identityKey        String   @map("identity_key")
+  turnId             String?  @map("turn_id")
+  cognitionTurnSeq   Int      @map("cognition_turn_seq")
+  segmentSeq         Int?     @map("segment_seq")
+  attemptKey         String?  @map("attempt_key")
+  claimId            String?  @map("claim_id")
+  disposition        String
+  startedAt          DateTime? @map("started_at")
+  startedAtEstimated Boolean  @default(false) @map("started_at_estimated")
+  completedAt        DateTime? @map("completed_at")
+  durationMs         Int?     @map("duration_ms")
+  stageBefore        String?  @map("stage_before")
+  stageAfter         String?  @map("stage_after")
+  cognition          Json?
+  timings            Json?
+  usage              Json?
+  llmCalls            Json?    @map("llm_calls")
+  toolCalls           Json?    @map("tool_calls")
+  childCalls          Json?    @map("child_calls")
+  llmCallCount        Int      @default(0) @map("llm_call_count")
+  memoryOpCount       Int      @default(0) @map("memory_op_count")
+  toolCallCount       Int      @default(0) @map("tool_call_count")
+  childCallCount      Int      @default(0) @map("child_call_count")
+  inputTokens         Int      @default(0) @map("input_tokens")
+  outputTokens        Int      @default(0) @map("output_tokens")
+  knownCostUsd        Decimal? @map("known_cost_usd") @db.Decimal(18, 6)
+  traceId             String?  @map("trace_id")
+  spanId              String?  @map("span_id")
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @updatedAt @map("updated_at")
+
+  @@unique([tenantId, taskId, identityKey])
+  @@index([tenantId, taskId, cognitionTurnSeq])
+  @@index([tenantId, rootTaskId, taskId, segmentSeq])
+  @@index([tenantId, taskId, segmentSeq, cognitionTurnSeq, id])
+  @@index([tenantId, taskId, attemptKey])
+  @@map("cognitive_turn_runs")
+}
+
+model RunEffect {
+  id              String   @id @default(cuid())
+  tenantId        String   @map("tenant_id")
+  rootTaskId      String   @map("root_task_id")
+  taskId          String   @map("task_id")
+  turnSeq         Int?     @map("turn_seq")
+  operation       String
+  status          String
+  idempotencyKey  String?  @unique @map("idempotency_key")
+  token           String?
+  providerRunId   String?  @map("provider_run_id")
+  artifactId      String?  @map("artifact_id")
+  summary         String?
+  errorCode       String?  @map("error_code")
+  errorMessage    String?  @map("error_message")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@index([tenantId, rootTaskId, operation, updatedAt])
+  @@index([tenantId, taskId, turnSeq, operation])
+  @@index([tenantId, taskId, updatedAt, id])
+  @@map("run_effects")
+}
+
+model OperatorProjectionCursor {
+  tenantId       String   @map("tenant_id")
+  source         String
+  cursor         String
+  processedCount Int     @default(0) @map("processed_count")
+  mismatchCount  Int     @default(0) @map("mismatch_count")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  @@id([tenantId, source])
+  @@map("operator_projection_cursors")
+}
+
+model OperatorAuditEvent {
+  id               String   @id @default(cuid())
+  tenantId         String?  @map("tenant_id")
+  action           String
+  actorType        String   @map("actor_type")
+  actorId          String   @map("actor_id")
+  rootTaskId       String?  @map("root_task_id")
+  taskId           String?  @map("task_id")
+  agentId          String?  @map("agent_id")
+  reason           String?
+  accepted         Boolean
+  resultStatus     String?  @map("result_status")
+  errorCode        String?  @map("error_code")
+  childPropagation String?  @map("child_propagation")
+  metadata         Json?
+  requestedAt      DateTime @map("requested_at")
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  @@index([tenantId, createdAt])
+  @@index([tenantId, action, createdAt])
+  @@index([tenantId, taskId, createdAt])
+  @@map("operator_audit_events")
+}
+
+model DurableSubscriptionCursor {
+  tenantId       String   @map("tenant_id")
+  streamId       String   @map("stream_id")
+  consumerId     String   @map("consumer_id")
+  sequenceNumber Int      @map("sequence_number")
+  updatedAt      DateTime @map("updated_at")
+
+  @@id([tenantId, streamId, consumerId])
+  @@map("durable_subscription_cursors")
+}
+
+model ConversationDeadLetter {
+  tenantId       String   @map("tenant_id")
+  conversationId String   @map("conversation_id")
+  sequenceNumber Int      @map("sequence_number")
+  consumerId     String   @map("consumer_id")
+  record         Json
+  lastError      String   @map("last_error")
+  attempts       Int
+  deadletteredAt DateTime @map("deadlettered_at")
+
+  @@id([tenantId, conversationId, sequenceNumber, consumerId])
+  @@map("conversation_dead_letter")
 }
