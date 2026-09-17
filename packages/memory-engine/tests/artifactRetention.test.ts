@@ -69,12 +69,42 @@ describe('durable artifact references', () => {
         await expect(cache.inheritArtifactOwner('tenant', 'checkpoint:old', 'checkpoint:new')).resolves.toEqual(['artifact-1', 'artifact-2']);
         expect(tx.artifactReference.findMany).toHaveBeenCalledWith({
             where: { tenantId: 'tenant', ownerId: 'checkpoint:old' },
+            orderBy: { artifactId: 'asc' },
+            take: 500,
             select: { artifactId: true, cacheEntryId: true },
         });
         expect(tx.artifactReference.createMany).toHaveBeenCalledWith({
             data: references.map((reference) => ({ tenantId: 'tenant', artifactId: reference.artifactId, ownerId: 'checkpoint:new', cacheEntryId: reference.cacheEntryId })),
             skipDuplicates: true,
         });
+    });
+
+    it('inherits large owners in retryable bounded transactions', async () => {
+        const references = Array.from({ length: 1_201 }, (_, index) => ({
+            artifactId: `artifact-${String(index).padStart(4, '0')}`,
+            cacheEntryId: `cache-${index}`,
+        }));
+        const copied = new Set<string>();
+        const transactionPageSizes: number[] = [];
+        const tx = {
+            artifactReference: {
+                findMany: jest.fn(async ({ where, take }: any) => references
+                    .filter((reference) => !where.artifactId?.gt || reference.artifactId > where.artifactId.gt)
+                    .slice(0, take)),
+                createMany: jest.fn(async ({ data }: any) => {
+                    transactionPageSizes.push(data.length);
+                    for (const reference of data) copied.add(reference.artifactId);
+                    return { count: data.length };
+                }),
+            },
+        };
+        const prisma = { $transaction: jest.fn(async (fn: (client: typeof tx) => Promise<unknown>) => fn(tx)) };
+        const cache = new AgentResultCache(prisma as any);
+
+        await expect(cache.inheritArtifactOwner('tenant', 'checkpoint:old', 'checkpoint:new')).resolves.toHaveLength(1_201);
+        expect(transactionPageSizes).toEqual([500, 500, 201]);
+        expect(copied.size).toBe(1_201);
+        expect(prisma.$transaction).toHaveBeenCalledTimes(3);
     });
 
     it('retains idempotently and refuses deletion while referenced', async () => {

@@ -337,19 +337,44 @@ export class AgentResultCache {
         }
         const excluded = [...new Set(excludedArtifactIds)];
         for (const artifactId of excluded) this.assertArtifactIdentity(artifactId, toOwnerId);
-        return this.prisma.$transaction(async (tx: any) => {
-            const existing: Array<{ artifactId: string; cacheEntryId: string }> = await tx.artifactReference.findMany({
-                where: { tenantId, ownerId: fromOwnerId, ...(excluded.length ? { artifactId: { notIn: excluded } } : {}) },
-                select: { artifactId: true, cacheEntryId: true },
-            });
-            if (existing.length) {
-                await tx.artifactReference.createMany({
-                    data: existing.map((reference) => ({ tenantId, artifactId: reference.artifactId, ownerId: toOwnerId, cacheEntryId: reference.cacheEntryId })),
-                    skipDuplicates: true,
+        const pageSize = 500;
+        const inherited: string[] = [];
+        let cursor: string | undefined;
+        // The predecessor owner remains authoritative until its successor wins
+        // the caller's checkpoint CAS. Copying in retryable pages therefore
+        // keeps every transaction bounded without exposing an unprotected
+        // artifact window. A response loss is safe: createMany is idempotent
+        // and a retry may copy an already-inherited page again.
+        for (;;) {
+            const page = await this.prisma.$transaction(async (tx: any) => {
+                const existing: Array<{ artifactId: string; cacheEntryId: string }> = await tx.artifactReference.findMany({
+                    where: {
+                        tenantId,
+                        ownerId: fromOwnerId,
+                        ...(excluded.length || cursor ? {
+                            artifactId: {
+                                ...(excluded.length ? { notIn: excluded } : {}),
+                                ...(cursor ? { gt: cursor } : {}),
+                            },
+                        } : {}),
+                    },
+                    orderBy: { artifactId: 'asc' },
+                    take: pageSize,
+                    select: { artifactId: true, cacheEntryId: true },
                 });
-            }
-            return existing.map((reference) => reference.artifactId);
-        });
+                if (existing.length) {
+                    await tx.artifactReference.createMany({
+                        data: existing.map((reference) => ({ tenantId, artifactId: reference.artifactId, ownerId: toOwnerId, cacheEntryId: reference.cacheEntryId })),
+                        skipDuplicates: true,
+                    });
+                }
+                return existing;
+            });
+            if (page.length === 0) return inherited;
+            inherited.push(...page.map((reference: { artifactId: string }) => reference.artifactId));
+            cursor = page[page.length - 1]!.artifactId;
+            if (page.length < pageSize) return inherited;
+        }
     }
 
     /** Release exactly one owner; other owners continue to protect the artifact. */
